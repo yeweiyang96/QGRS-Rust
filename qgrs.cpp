@@ -330,7 +330,7 @@ void seedQ(queue<G4Candidate> & cands, string sequence, int min_tetrads) {
         cout << "Tetrad level " << g << ": " << starts.size() << " seeds found." <<  endl;
         total_seeds += starts.size();
         while ( !starts.empty() ) {
-            // cands.push(G4Candidate(sequence, g, starts.front()));
+            cands.push(G4Candidate(sequence, g, starts.front()));
             starts.pop();
         }
         g+= 1;

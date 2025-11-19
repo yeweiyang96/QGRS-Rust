@@ -1,9 +1,15 @@
 [package]
-name = "find-repeat-G"
+name = "QGRS-Rust"
 version = "0.1.0"
 edition = "2024"
+
+[lib]
+name = "qgrs_rust"
 
 [dependencies]
 memmap2 = "0.9.9"
 rayon = "1.11"
 memchr = "2.7"
+arrow-array = "53.1.0"
+arrow-schema = "53.1.0"
+parquet = { version = "53.1.0", features = ["arrow"] }
