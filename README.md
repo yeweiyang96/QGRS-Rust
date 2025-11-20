@@ -10,7 +10,7 @@
 
 </div>
 
-QGRS-Rust is a Rust-native port of the original `qgrs.cpp` pipeline for discovering G-quadruplexes (G4s). It accepts inline sequences or FASTA/plain files, applies the legacy scoring logic, and writes chromosome-aware hits as CSV or Parquet. The old `find-repeat-G` binary exists only as a stub—`qgrs` is the supported CLI.
+QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://github.com/freezer333/qgrs-cpp) project. The refactor preserves the legacy scoring math while unlocking modern performance tricks: zero-copy SIMD-friendly scanners, Rayon-powered chromosome fan-out, and dual ingestion paths (`mmap` or streaming) that keep throughput high and memory usage predictable. New functionality includes Parquet export, strict CLI validation, and a true streaming FASTA parser capable of processing multi-hundred-gigabyte `.fa` archives without ever materializing an entire chromosome in RAM. The single `qgrs` CLI now covers inline sequences, mmap batches, and the ultra-large streaming mode in one coherent interface.
 
 ## Table of contents
 
