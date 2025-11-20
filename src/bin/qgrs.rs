@@ -1,10 +1,15 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use qgrs_rust::{InputMode, ScanLimits, DEFAULT_MAX_G4_LENGTH, DEFAULT_MAX_G_RUN, qgrs};
+use qgrs_rust::{
+    DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ProgressReporterHandle, ScanLimits, qgrs,
+};
+use qgrs_rust::ProgressReporter;
 use rayon::prelude::*;
 
 fn main() {
@@ -131,12 +136,11 @@ where
         return Err(usage("--max-g-run must be ≥ --min-tetrads"));
     }
     if max_g4_length < min_required_length {
-        return Err(usage(
-            "--max-g4-length must be ≥ 4 * --min-tetrads",
-        ));
+        return Err(usage("--max-g4-length must be ≥ 4 * --min-tetrads"));
     }
 
     let limits = ScanLimits::new(max_g4_length, max_g_run);
+    let progress = TerminalProgressReporter::new_handle();
 
     match input {
         InputSpec::Inline(seq) => {
@@ -150,6 +154,7 @@ where
                 min_tetrads,
                 min_score,
                 limits,
+                progress.clone(),
             )?;
         }
         InputSpec::File(path) => {
@@ -166,6 +171,7 @@ where
                 min_score,
                 limits,
                 output_dir,
+                progress.clone(),
             )?;
         }
     }
@@ -211,6 +217,8 @@ enum InputSpec {
     File(PathBuf),
 }
 
+const INLINE_PROGRESS_NAME: &str = "inline-sequence";
+
 fn process_inline_sequence(
     sequence: String,
     format: OutputFormat,
@@ -218,11 +226,18 @@ fn process_inline_sequence(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    progress: ProgressReporterHandle,
 ) -> Result<(), String> {
     match format {
         OutputFormat::Csv => {
-            let csv =
-                qgrs::find_csv_owned_with_limits(sequence, min_tetrads, min_score, limits);
+            let csv = qgrs::find_csv_owned_with_limits_with_progress(
+                sequence,
+                min_tetrads,
+                min_score,
+                limits,
+                INLINE_PROGRESS_NAME,
+                progress.clone(),
+            );
             if let Some(path) = output_path {
                 fs::write(&path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?
             } else {
@@ -234,8 +249,16 @@ fn process_inline_sequence(
                 output_path.ok_or_else(|| usage("--output is required when --format parquet"))?;
             let file = fs::File::create(&path)
                 .map_err(|err| format!("failed to create {path:?}: {err}"))?;
-            qgrs::write_parquet_owned_with_limits(sequence, min_tetrads, min_score, limits, file)
-                .map_err(|err| format!("failed to write parquet: {err}"))?;
+            qgrs::write_parquet_owned_with_limits_with_progress(
+                sequence,
+                min_tetrads,
+                min_score,
+                limits,
+                INLINE_PROGRESS_NAME,
+                progress.clone(),
+                file,
+            )
+            .map_err(|err| format!("failed to write parquet: {err}"))?;
         }
     }
     Ok(())
@@ -249,6 +272,7 @@ fn process_fasta_file(
     min_score: i32,
     limits: ScanLimits,
     output_dir: Option<PathBuf>,
+    progress: ProgressReporterHandle,
 ) -> Result<(), String> {
     let dir = output_dir.ok_or_else(|| usage("--output-dir is required when --file is used"))?;
     fs::create_dir_all(&dir).map_err(|err| format!("failed to create {dir:?}: {err}"))?;
@@ -265,17 +289,19 @@ fn process_fasta_file(
                 let filename = next_output_filename(&chrom.name, format, &mut name_counts);
                 chrom_outputs.push((chrom, dir.join(filename)));
             }
-            chrom_outputs
-                .into_par_iter()
-                .try_for_each(|(chrom, filepath)| -> Result<(), String> {
+            let reporter = progress.clone();
+            chrom_outputs.into_par_iter().try_for_each(
+                |(chrom, filepath)| -> Result<(), String> {
                     let qgrs::ChromSequence { name, sequence } = chrom;
                     match format {
                         OutputFormat::Csv => {
-                            let csv = qgrs::find_csv_owned_with_limits(
+                            let csv = qgrs::find_csv_owned_with_limits_with_progress(
                                 sequence,
                                 min_tetrads,
                                 min_score,
                                 limits,
+                                &name,
+                                reporter.clone(),
                             );
                             fs::write(&filepath, csv)
                                 .map_err(|err| format!("failed to write {filepath:?}: {err}"))?
@@ -283,42 +309,47 @@ fn process_fasta_file(
                         OutputFormat::Parquet => {
                             let file = fs::File::create(&filepath)
                                 .map_err(|err| format!("failed to create {filepath:?}: {err}"))?;
-                            qgrs::write_parquet_owned_with_limits(
+                            qgrs::write_parquet_owned_with_limits_with_progress(
                                 sequence,
                                 min_tetrads,
                                 min_score,
                                 limits,
+                                &name,
+                                reporter.clone(),
                                 file,
                             )
-                                .map_err(|err| format!("failed to write parquet for {}: {err}", name))?
+                            .map_err(|err| format!("failed to write parquet for {}: {err}", name))?
                         }
                     }
                     Ok(())
-                })?;
+                },
+            )?;
         }
         InputMode::Stream => {
             let mut processed = 0usize;
-            qgrs::stream::process_fasta_stream_with_limits(
+            qgrs::stream::process_fasta_stream_with_limits_with_progress(
                 &path,
                 min_tetrads,
                 min_score,
                 limits,
+                progress.clone(),
                 |name, results| {
-                processed += 1;
-                let filename = next_output_filename(&name, format, &mut name_counts);
-                let filepath = dir.join(&filename);
-                match format {
-                    OutputFormat::Csv => {
-                        let csv = qgrs::render_csv_results(&results);
-                        fs::write(&filepath, csv)?;
+                    processed += 1;
+                    let filename = next_output_filename(&name, format, &mut name_counts);
+                    let filepath = dir.join(&filename);
+                    match format {
+                        OutputFormat::Csv => {
+                            let csv = qgrs::render_csv_results(&results);
+                            fs::write(&filepath, csv)?;
+                        }
+                        OutputFormat::Parquet => {
+                            let file = fs::File::create(&filepath)?;
+                            qgrs::write_parquet_results(&results, file).map_err(|err| {
+                                io::Error::new(io::ErrorKind::Other, err.to_string())
+                            })?;
+                        }
                     }
-                    OutputFormat::Parquet => {
-                        let file = fs::File::create(&filepath)?;
-                        qgrs::write_parquet_results(&results, file)
-                            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-                    }
-                }
-                Ok(())
+                    Ok(())
                 },
             )
             .map_err(|err| format!("failed to process {path:?}: {err}"))?;
@@ -425,5 +456,147 @@ impl OutputFormat {
             OutputFormat::Csv => "csv",
             OutputFormat::Parquet => "parquet",
         }
+    }
+}
+
+struct TerminalProgressReporter {
+    state: Mutex<ProgressDisplayState>,
+}
+
+impl TerminalProgressReporter {
+    const RENDER_INTERVAL: Duration = Duration::from_millis(80);
+
+    fn new() -> Self {
+        let initial = Instant::now()
+            .checked_sub(Self::RENDER_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        Self {
+            state: Mutex::new(ProgressDisplayState::new(initial)),
+        }
+    }
+
+    fn new_handle() -> ProgressReporterHandle {
+        Arc::new(Self::new()) as ProgressReporterHandle
+    }
+}
+
+impl ProgressReporter for TerminalProgressReporter {
+    fn start_chromosome(&self, name: &str, total: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.touch_entry(name).reset(total);
+        state.render(false);
+    }
+
+    fn seed_progress(&self, name: &str, processed: usize, total: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.touch_entry(name).update(processed, total);
+        state.render(false);
+    }
+
+    fn finish_chromosome(&self, name: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(entry) = state.entries.get_mut(name) {
+            entry.complete();
+        }
+        state.render(true);
+        state.remove_entry(name);
+    }
+}
+
+struct ProgressDisplayState {
+    entries: HashMap<String, ProgressEntry>,
+    order: Vec<String>,
+    last_render: Instant,
+}
+
+impl ProgressDisplayState {
+    fn new(initial: Instant) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            last_render: initial,
+        }
+    }
+
+    fn touch_entry(&mut self, name: &str) -> &mut ProgressEntry {
+        self.entries.entry(name.to_string()).or_insert_with(|| {
+            self.order.push(name.to_string());
+            ProgressEntry::default()
+        })
+    }
+
+    fn remove_entry(&mut self, name: &str) {
+        if self.entries.remove(name).is_some() {
+            self.order.retain(|label| label != name);
+            self.render(true);
+            if self.entries.is_empty() {
+                self.clear_line();
+            }
+        }
+    }
+
+    fn render(&mut self, force: bool) {
+        let now = Instant::now();
+        if !force
+            && now.duration_since(self.last_render) < TerminalProgressReporter::RENDER_INTERVAL
+        {
+            return;
+        }
+        self.last_render = now;
+        let mut stderr = io::stderr();
+        if self.entries.is_empty() {
+            let _ = write!(stderr, "\r\x1b[K");
+            let _ = stderr.flush();
+            return;
+        }
+        let mut parts = Vec::with_capacity(self.order.len());
+        for name in &self.order {
+            if let Some(entry) = self.entries.get(name) {
+                parts.push(entry.format(name));
+            }
+        }
+        let line = parts.join(" | ");
+        let _ = write!(stderr, "\r{line}\x1b[K");
+        let _ = stderr.flush();
+    }
+
+    fn clear_line(&self) {
+        let mut stderr = io::stderr();
+        let _ = write!(stderr, "\r\x1b[K");
+        let _ = stderr.flush();
+    }
+}
+
+#[derive(Default)]
+struct ProgressEntry {
+    total: usize,
+    processed: usize,
+}
+
+impl ProgressEntry {
+    fn reset(&mut self, total: usize) {
+        self.total = total.max(1);
+        self.processed = 0;
+    }
+
+    fn update(&mut self, processed: usize, total: usize) {
+        self.total = total.max(1);
+        self.processed = processed.min(self.total);
+    }
+
+    fn complete(&mut self) {
+        self.processed = self.total.max(1);
+    }
+
+    fn format(&self, name: &str) -> String {
+        let total = self.total.max(1);
+        let processed = self.processed.min(total);
+        let percent = (processed as f64 / total as f64) * 100.0;
+        format!(
+            "{name} {:>6.2}% ({}/{})",
+            percent.min(100.0),
+            processed,
+            total
+        )
     }
 }

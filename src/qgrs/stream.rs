@@ -6,15 +6,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use rayon::spawn;
 
+use crate::ProgressReporterHandle;
+
 use super::{
-    G4,
-    ScanLimits,
-    chunk_size_for_limits,
-    consolidate_g4s,
-    compute_chunk_overlap,
-    find_owned_with_limits,
-    parse_chrom_name,
-    shift_g4,
+    G4, ProgressScope, ScanLimits, chunk_size_for_limits, compute_chunk_overlap, consolidate_g4s,
+    find_owned_with_limits, find_owned_with_limits_with_scope, parse_chrom_name, shift_g4,
 };
 
 pub fn process_fasta_stream<F>(
@@ -35,6 +31,26 @@ where
     )
 }
 
+pub fn process_fasta_stream_with_progress<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    reporter: ProgressReporterHandle,
+    on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, Vec<G4>) -> io::Result<()>,
+{
+    process_fasta_stream_with_limits_with_progress(
+        path,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        reporter,
+        on_chromosome,
+    )
+}
+
 pub fn process_fasta_stream_with_limits<F>(
     path: &Path,
     min_tetrads: usize,
@@ -47,7 +63,37 @@ where
 {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
-    process_reader_with_limits(reader, min_tetrads, min_score, limits, &mut on_chromosome)
+    process_reader_with_limits_internal(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        None,
+        &mut on_chromosome,
+    )
+}
+
+pub fn process_fasta_stream_with_limits_with_progress<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    reporter: ProgressReporterHandle,
+    mut on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, Vec<G4>) -> io::Result<()>,
+{
+    let file = File::open(path)?;
+    let reader = BufReader::with_capacity(1 << 20, file);
+    process_reader_with_limits_internal(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        Some(reporter),
+        &mut on_chromosome,
+    )
 }
 
 pub fn process_reader<R, F>(
@@ -60,14 +106,58 @@ where
     R: BufRead,
     F: FnMut(String, Vec<G4>) -> io::Result<()>,
 {
-    process_reader_with_limits(reader, min_tetrads, min_score, ScanLimits::default(), on_chromosome)
+    process_reader_with_limits_internal(
+        reader,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        None,
+        on_chromosome,
+    )
 }
 
 pub fn process_reader_with_limits<R, F>(
+    reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, Vec<G4>) -> io::Result<()>,
+{
+    process_reader_with_limits_internal(reader, min_tetrads, min_score, limits, None, on_chromosome)
+}
+
+pub fn process_reader_with_limits_with_progress<R, F>(
+    reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    reporter: ProgressReporterHandle,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, Vec<G4>) -> io::Result<()>,
+{
+    process_reader_with_limits_internal(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        Some(reporter),
+        on_chromosome,
+    )
+}
+
+fn process_reader_with_limits_internal<R, F>(
     mut reader: R,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    reporter: Option<ProgressReporterHandle>,
     on_chromosome: &mut F,
 ) -> io::Result<usize>
 where
@@ -90,13 +180,25 @@ where
             }
             chrom_index += 1;
             let name = parse_chrom_name(&line, chrom_index);
-            current = Some(StreamChromosome::new(name, min_tetrads, min_score, limits));
+            current = Some(StreamChromosome::new(
+                name,
+                min_tetrads,
+                min_score,
+                limits,
+                reporter.as_ref().map(|handle| handle.clone()),
+            ));
             continue;
         }
         if current.is_none() {
             chrom_index += 1;
             let fallback = format!("chromosome_{}", chrom_index);
-            current = Some(StreamChromosome::new(fallback, min_tetrads, min_score, limits));
+            current = Some(StreamChromosome::new(
+                fallback,
+                min_tetrads,
+                min_score,
+                limits,
+                reporter.as_ref().map(|handle| handle.clone()),
+            ));
         }
         if let Some(chrom) = current.as_mut() {
             for byte in line.bytes() {
@@ -120,22 +222,49 @@ where
 struct StreamChromosome {
     name: String,
     scheduler: StreamChunkScheduler,
+    length: usize,
+    progress: Option<ProgressScope>,
 }
 
 impl StreamChromosome {
-    fn new(name: String, min_tetrads: usize, min_score: i32, limits: ScanLimits) -> Self {
+    fn new(
+        name: String,
+        min_tetrads: usize,
+        min_score: i32,
+        limits: ScanLimits,
+        reporter: Option<ProgressReporterHandle>,
+    ) -> Self {
+        let scope = reporter.map(|handle| ProgressScope::new(&name, 1, handle));
+        let scheduler = StreamChunkScheduler::new(min_tetrads, min_score, limits, scope.clone());
         Self {
             name,
-            scheduler: StreamChunkScheduler::new(min_tetrads, min_score, limits),
+            scheduler,
+            length: 0,
+            progress: scope,
         }
     }
 
     fn push_byte(&mut self, byte: u8) {
+        self.length += 1;
+        if let Some(scope) = &self.progress {
+            scope.update_total(self.length);
+            if self.length == 1 {
+                scope.start();
+            }
+        }
         self.scheduler.push_byte(byte);
     }
 
     fn finish(self) -> (String, Vec<G4>) {
+        if self.length == 0 {
+            if let Some(scope) = &self.progress {
+                scope.start();
+            }
+        }
         let results = self.scheduler.finish();
+        if let Some(scope) = &self.progress {
+            scope.finish();
+        }
         (self.name, results)
     }
 }
@@ -151,10 +280,16 @@ struct StreamChunkScheduler {
     tx: Sender<Vec<G4>>,
     rx: Receiver<Vec<G4>>,
     inflight: usize,
+    progress: Option<ProgressScope>,
 }
 
 impl StreamChunkScheduler {
-    fn new(min_tetrads: usize, min_score: i32, limits: ScanLimits) -> Self {
+    fn new(
+        min_tetrads: usize,
+        min_score: i32,
+        limits: ScanLimits,
+        progress: Option<ProgressScope>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let chunk_size = chunk_size_for_limits(limits);
         let overlap = compute_chunk_overlap(min_tetrads, limits);
@@ -170,6 +305,7 @@ impl StreamChunkScheduler {
             tx,
             rx,
             inflight: 0,
+            progress,
         }
     }
 
@@ -215,10 +351,24 @@ impl StreamChunkScheduler {
         let min_score = self.min_score;
         let limits = self.limits;
         let tx = self.tx.clone();
+        let scope = self
+            .progress
+            .as_ref()
+            .map(|progress| progress.with_offset(offset));
         self.inflight += 1;
         spawn(move || {
             let sequence: String = chunk.into_iter().map(|b| b as char).collect();
-            let mut hits = find_owned_with_limits(sequence, min_tetrads, min_score, limits);
+            let mut hits = if let Some(progress_scope) = scope {
+                find_owned_with_limits_with_scope(
+                    sequence,
+                    min_tetrads,
+                    min_score,
+                    limits,
+                    Some(progress_scope),
+                )
+            } else {
+                find_owned_with_limits(sequence, min_tetrads, min_score, limits)
+            };
             for g4 in &mut hits {
                 shift_g4(g4, offset);
             }

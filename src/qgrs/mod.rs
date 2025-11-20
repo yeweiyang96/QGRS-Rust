@@ -4,6 +4,9 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::ProgressReporterHandle;
 
 use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
@@ -25,6 +28,70 @@ pub enum InputMode {
 pub struct ChromSequence {
     pub name: String,
     pub sequence: String,
+}
+
+#[derive(Clone)]
+pub(super) struct ProgressScope {
+    reporter: ProgressReporterHandle,
+    name: Arc<str>,
+    total_length: Arc<AtomicUsize>,
+    offset: usize,
+}
+
+impl ProgressScope {
+    pub(super) fn new(name: &str, total_length: usize, reporter: ProgressReporterHandle) -> Self {
+        Self {
+            reporter,
+            name: Arc::<str>::from(name),
+            total_length: Arc::new(AtomicUsize::new(total_length.max(1))),
+            offset: 0,
+        }
+    }
+
+    pub(super) fn with_offset(&self, delta: usize) -> Self {
+        Self {
+            reporter: self.reporter.clone(),
+            name: self.name.clone(),
+            total_length: self.total_length.clone(),
+            offset: self.offset + delta,
+        }
+    }
+
+    fn current_total(&self) -> usize {
+        self.total_length.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn update_total(&self, total_length: usize) {
+        self.total_length
+            .store(total_length.max(1), Ordering::Relaxed);
+    }
+
+    fn absolute_position(&self, local_start: usize, total: usize) -> usize {
+        if total == 0 {
+            return 0;
+        }
+        self.offset.saturating_add(local_start).min(total - 1)
+    }
+
+    pub(super) fn report_seed(&self, local_start: usize) {
+        let total = self.current_total();
+        if total == 0 {
+            return;
+        }
+        let absolute = self.absolute_position(local_start, total);
+        self.reporter.seed_progress(&self.name, absolute, total);
+    }
+
+    pub(super) fn start(&self) {
+        let total = self.current_total();
+        self.reporter.start_chromosome(&self.name, total);
+    }
+
+    pub(super) fn finish(&self) {
+        let total = self.current_total().max(1);
+        self.reporter.seed_progress(&self.name, total, total);
+        self.reporter.finish_chromosome(&self.name);
+    }
 }
 
 pub const DEFAULT_MAX_G4_LENGTH: usize = 45;
@@ -297,6 +364,10 @@ impl G4Candidate {
         }
         results
     }
+
+    fn is_seed(&self) -> bool {
+        self.y1 < 0 && self.y2 < 0 && self.y3 < 0
+    }
 }
 
 fn seed_queue(
@@ -437,18 +508,28 @@ pub fn find_with_limits(
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
-    let chunk_size = chunk_size_for_limits(limits);
-    if sequence.len() > chunk_size {
-        return find_owned_chunked(
-            sequence.to_string(),
-            min_tetrads,
-            min_score,
-            limits,
-            chunk_size,
-        );
-    }
-    let seq = Arc::new(SequenceData::new(sequence));
-    find_with_sequence(seq, min_tetrads, min_score, limits)
+    find_with_limits_internal(sequence, min_tetrads, min_score, limits, None)
+}
+
+pub fn find_with_limits_with_progress(
+    sequence: &str,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    name: &str,
+    reporter: ProgressReporterHandle,
+) -> Vec<G4> {
+    let scope = ProgressScope::new(name, sequence.len(), reporter);
+    scope.start();
+    let results = find_with_limits_internal(
+        sequence,
+        min_tetrads,
+        min_score,
+        limits,
+        Some(scope.clone()),
+    );
+    scope.finish();
+    results
 }
 
 pub fn find_owned(sequence: String, min_tetrads: usize, min_score: i32) -> Vec<G4> {
@@ -461,11 +542,39 @@ pub fn find_owned_with_limits(
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
-    let chunk_size = chunk_size_for_limits(limits);
-    if sequence.len() > chunk_size {
-        return find_owned_chunked(sequence, min_tetrads, min_score, limits, chunk_size);
-    }
-    find_owned_internal(sequence, min_tetrads, min_score, limits)
+    find_owned_with_limits_internal(sequence, min_tetrads, min_score, limits, None)
+}
+
+pub fn find_owned_with_limits_with_progress(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    name: &str,
+    reporter: ProgressReporterHandle,
+) -> Vec<G4> {
+    let length = sequence.len();
+    let scope = ProgressScope::new(name, length, reporter);
+    scope.start();
+    let results = find_owned_with_limits_internal(
+        sequence,
+        min_tetrads,
+        min_score,
+        limits,
+        Some(scope.clone()),
+    );
+    scope.finish();
+    results
+}
+
+pub(crate) fn find_owned_with_limits_with_scope(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    scope: Option<ProgressScope>,
+) -> Vec<G4> {
+    find_owned_with_limits_internal(sequence, min_tetrads, min_score, limits, scope)
 }
 
 fn find_owned_internal(
@@ -473,9 +582,10 @@ fn find_owned_internal(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    progress: Option<ProgressScope>,
 ) -> Vec<G4> {
     let seq = Arc::new(SequenceData::from_owned(sequence));
-    find_with_sequence(seq, min_tetrads, min_score, limits)
+    find_with_sequence(seq, min_tetrads, min_score, limits, progress)
 }
 
 fn find_owned_chunked(
@@ -484,10 +594,11 @@ fn find_owned_chunked(
     min_score: i32,
     limits: ScanLimits,
     chunk_size: usize,
+    progress: Option<ProgressScope>,
 ) -> Vec<G4> {
     let len = sequence.len();
     if len <= chunk_size {
-        return find_owned_internal(sequence, min_tetrads, min_score, limits);
+        return find_owned_internal(sequence, min_tetrads, min_score, limits, progress);
     }
     let overlap = compute_chunk_overlap(min_tetrads, limits);
     let mut start = 0usize;
@@ -503,7 +614,8 @@ fn find_owned_chunked(
     let merged: Vec<G4> = chunks
         .into_par_iter()
         .flat_map_iter(|(offset, cutoff, is_last, chunk)| {
-            let hits = find_owned_internal(chunk, min_tetrads, min_score, limits);
+            let chunk_progress = progress.as_ref().map(|scope| scope.with_offset(offset));
+            let hits = find_owned_internal(chunk, min_tetrads, min_score, limits, chunk_progress);
             hits.into_iter().filter_map(move |mut g4| {
                 shift_g4(&mut g4, offset);
                 if !is_last && g4.start >= cutoff {
@@ -516,10 +628,51 @@ fn find_owned_chunked(
     consolidate_g4s(merged)
 }
 
+fn find_with_limits_internal(
+    sequence: &str,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    progress: Option<ProgressScope>,
+) -> Vec<G4> {
+    let chunk_size = chunk_size_for_limits(limits);
+    if sequence.len() > chunk_size {
+        return find_owned_chunked(
+            sequence.to_string(),
+            min_tetrads,
+            min_score,
+            limits,
+            chunk_size,
+            progress,
+        );
+    }
+    let seq = Arc::new(SequenceData::new(sequence));
+    find_with_sequence(seq, min_tetrads, min_score, limits, progress)
+}
+
+fn find_owned_with_limits_internal(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    progress: Option<ProgressScope>,
+) -> Vec<G4> {
+    let chunk_size = chunk_size_for_limits(limits);
+    if sequence.len() > chunk_size {
+        return find_owned_chunked(
+            sequence,
+            min_tetrads,
+            min_score,
+            limits,
+            chunk_size,
+            progress,
+        );
+    }
+    find_owned_internal(sequence, min_tetrads, min_score, limits, progress)
+}
+
 pub(crate) fn chunk_size_for_limits(limits: ScanLimits) -> usize {
-    let desired = limits
-        .max_g4_length
-        .saturating_add(WINDOW_PADDING_BP);
+    let desired = limits.max_g4_length.saturating_add(WINDOW_PADDING_BP);
     desired.clamp(WINDOW_MIN_BP, WINDOW_MAX_BP)
 }
 
@@ -546,12 +699,18 @@ fn find_with_sequence(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    progress: Option<ProgressScope>,
 ) -> Vec<G4> {
     let mut cands = VecDeque::new();
     seed_queue(&mut cands, seq.clone(), min_tetrads, limits);
     let mut raw_g4s = Vec::new();
 
     while let Some(cand) = cands.pop_front() {
+        if cand.is_seed() {
+            if let Some(scope) = progress.as_ref() {
+                scope.report_seed(cand.start);
+            }
+        }
         if cand.complete() {
             if cand.viable(min_score) {
                 raw_g4s.push(G4::from_candidate(&cand));
@@ -591,6 +750,25 @@ pub fn find_csv_owned_with_limits(
     limits: ScanLimits,
 ) -> String {
     let results = find_owned_with_limits(sequence, min_tetrads, min_score, limits);
+    render_csv(&results)
+}
+
+pub fn find_csv_owned_with_limits_with_progress(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    name: &str,
+    reporter: ProgressReporterHandle,
+) -> String {
+    let results = find_owned_with_limits_with_progress(
+        sequence,
+        min_tetrads,
+        min_score,
+        limits,
+        name,
+        reporter,
+    );
     render_csv(&results)
 }
 
@@ -672,7 +850,13 @@ pub fn write_parquet<W: Write + Send + 'static>(
     min_score: i32,
     writer: W,
 ) -> Result<(), ExportError> {
-    write_parquet_with_limits(sequence, min_tetrads, min_score, ScanLimits::default(), writer)
+    write_parquet_with_limits(
+        sequence,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        writer,
+    )
 }
 
 pub fn write_parquet_with_limits<W: Write + Send + 'static>(
@@ -692,7 +876,13 @@ pub fn write_parquet_owned<W: Write + Send + 'static>(
     min_score: i32,
     writer: W,
 ) -> Result<(), ExportError> {
-    write_parquet_owned_with_limits(sequence, min_tetrads, min_score, ScanLimits::default(), writer)
+    write_parquet_owned_with_limits(
+        sequence,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        writer,
+    )
 }
 
 pub fn write_parquet_owned_with_limits<W: Write + Send + 'static>(
@@ -703,6 +893,26 @@ pub fn write_parquet_owned_with_limits<W: Write + Send + 'static>(
     writer: W,
 ) -> Result<(), ExportError> {
     let results = find_owned_with_limits(sequence, min_tetrads, min_score, limits);
+    write_parquet_from_results(&results, writer)
+}
+
+pub fn write_parquet_owned_with_limits_with_progress<W: Write + Send + 'static>(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    name: &str,
+    reporter: ProgressReporterHandle,
+    writer: W,
+) -> Result<(), ExportError> {
+    let results = find_owned_with_limits_with_progress(
+        sequence,
+        min_tetrads,
+        min_score,
+        limits,
+        name,
+        reporter,
+    );
     write_parquet_from_results(&results, writer)
 }
 
@@ -989,7 +1199,7 @@ mod tests {
         sequence.push_str("GGGGAGGGGAGGGGAGGGG");
         sequence.push_str(&"T".repeat(10));
 
-        let chunked = find_owned_chunked(sequence, 4, 17, limits, chunk_size);
+        let chunked = find_owned_chunked(sequence, 4, 17, limits, chunk_size, None);
 
         let starts: Vec<_> = chunked.iter().map(|g| g.start).collect();
         assert_eq!(starts.len(), 2);
