@@ -27,8 +27,34 @@ pub struct ChromSequence {
     pub sequence: String,
 }
 
-pub(crate) const CHUNK_SIZE: usize = 2 * 1024 * 1024;
-const CHUNK_OVERLAP_BASE: usize = 512;
+pub const DEFAULT_MAX_G4_LENGTH: usize = 45;
+pub const DEFAULT_MAX_G_RUN: usize = 10;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanLimits {
+    pub max_g4_length: usize,
+    pub max_g_run: usize,
+}
+
+impl ScanLimits {
+    pub const fn new(max_g4_length: usize, max_g_run: usize) -> Self {
+        Self {
+            max_g4_length,
+            max_g_run,
+        }
+    }
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        ScanLimits::new(DEFAULT_MAX_G4_LENGTH, DEFAULT_MAX_G_RUN)
+    }
+}
+
+const WINDOW_MIN_BP: usize = 32;
+const WINDOW_MAX_BP: usize = 64;
+const WINDOW_PADDING_BP: usize = 8;
+const OVERLAP_MARGIN_BP: usize = 16;
 
 #[derive(Clone)]
 struct SequenceData {
@@ -63,14 +89,16 @@ struct GRunScanner<'a> {
     data: &'a [u8],
     cursor: usize,
     min_tetrads: usize,
+    max_g_run: usize,
 }
 
 impl<'a> GRunScanner<'a> {
-    fn new(data: &'a [u8], min_tetrads: usize) -> Self {
+    fn new(data: &'a [u8], min_tetrads: usize, max_g_run: usize) -> Self {
         Self {
             data,
             cursor: 0,
             min_tetrads,
+            max_g_run,
         }
     }
 }
@@ -90,7 +118,7 @@ impl<'a> Iterator for GRunScanner<'a> {
             }
             self.cursor = if run_end < len { run_end + 1 } else { len };
             let run_len = run_end - run_start;
-            if run_len >= self.min_tetrads {
+            if run_len >= self.min_tetrads && run_len <= self.max_g_run {
                 return Some((run_start, run_len));
             }
         }
@@ -115,7 +143,7 @@ struct G4Candidate {
 }
 
 impl G4Candidate {
-    fn new(seq: Arc<SequenceData>, num_tetrads: usize, start: usize) -> Self {
+    fn new(seq: Arc<SequenceData>, num_tetrads: usize, start: usize, limits: ScanLimits) -> Self {
         Self {
             seq,
             num_tetrads,
@@ -123,7 +151,7 @@ impl G4Candidate {
             y1: -1,
             y2: -1,
             y3: -1,
-            max_length: maximum_length(num_tetrads),
+            max_length: maximum_length(num_tetrads, limits),
         }
     }
 
@@ -271,14 +299,30 @@ impl G4Candidate {
     }
 }
 
-fn seed_queue(cands: &mut VecDeque<G4Candidate>, seq: Arc<SequenceData>, min_tetrads: usize) {
-    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads) {
+fn seed_queue(
+    cands: &mut VecDeque<G4Candidate>,
+    seq: Arc<SequenceData>,
+    min_tetrads: usize,
+    limits: ScanLimits,
+) {
+    let mut max_tetrads_allowed = limits.max_g_run;
+    if limits.max_g4_length >= 4 {
+        max_tetrads_allowed = max_tetrads_allowed.min(limits.max_g4_length / 4);
+    }
+    if max_tetrads_allowed < min_tetrads {
+        return;
+    }
+    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads, limits.max_g_run) {
+        let capped_run_len = run_len.min(max_tetrads_allowed);
         let mut tetrads = min_tetrads;
-        while tetrads <= run_len {
-            let max_offset = run_len - tetrads;
+        while tetrads <= capped_run_len {
+            if tetrads * 4 > limits.max_g4_length {
+                break;
+            }
+            let max_offset = capped_run_len - tetrads;
             for offset in 0..=max_offset {
                 let start = run_start + offset;
-                cands.push_back(G4Candidate::new(seq.clone(), tetrads, start));
+                cands.push_back(G4Candidate::new(seq.clone(), tetrads, start, limits));
             }
             tetrads += 1;
         }
@@ -311,12 +355,12 @@ impl G4 {
             .slice_original(candidate.start, length)
             .to_string();
         Self {
-            start: candidate.start,
+            start: candidate.start + 1,
             end,
-            tetrad1: candidate.t1(),
-            tetrad2: candidate.t2(),
-            tetrad3: candidate.t3(),
-            tetrad4: candidate.t4(),
+            tetrad1: candidate.t1() + 1,
+            tetrad2: candidate.t2() + 1,
+            tetrad3: candidate.t3() + 1,
+            tetrad4: candidate.t4() + 1,
             y1: candidate.y1,
             y2: candidate.y2,
             y3: candidate.y3,
@@ -328,8 +372,9 @@ impl G4 {
     }
 }
 
-pub(super) fn maximum_length(num_tetrads: usize) -> usize {
-    if num_tetrads < 3 { 30 } else { 45 }
+pub(super) fn maximum_length(num_tetrads: usize, limits: ScanLimits) -> usize {
+    let base = if num_tetrads < 3 { 30 } else { 45 };
+    base.min(limits.max_g4_length)
 }
 
 fn overlapped(a: &G4, b: &G4) -> bool {
@@ -383,35 +428,72 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
 }
 
 pub fn find(sequence: &str, min_tetrads: usize, min_score: i32) -> Vec<G4> {
-    if sequence.len() > CHUNK_SIZE {
-        return find_owned_chunked(sequence.to_string(), min_tetrads, min_score);
+    find_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
+}
+
+pub fn find_with_limits(
+    sequence: &str,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    let chunk_size = chunk_size_for_limits(limits);
+    if sequence.len() > chunk_size {
+        return find_owned_chunked(
+            sequence.to_string(),
+            min_tetrads,
+            min_score,
+            limits,
+            chunk_size,
+        );
     }
     let seq = Arc::new(SequenceData::new(sequence));
-    find_with_sequence(seq, min_tetrads, min_score)
+    find_with_sequence(seq, min_tetrads, min_score, limits)
 }
 
 pub fn find_owned(sequence: String, min_tetrads: usize, min_score: i32) -> Vec<G4> {
-    if sequence.len() > CHUNK_SIZE {
-        return find_owned_chunked(sequence, min_tetrads, min_score);
-    }
-    find_owned_internal(sequence, min_tetrads, min_score)
+    find_owned_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
 }
 
-fn find_owned_internal(sequence: String, min_tetrads: usize, min_score: i32) -> Vec<G4> {
+pub fn find_owned_with_limits(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    let chunk_size = chunk_size_for_limits(limits);
+    if sequence.len() > chunk_size {
+        return find_owned_chunked(sequence, min_tetrads, min_score, limits, chunk_size);
+    }
+    find_owned_internal(sequence, min_tetrads, min_score, limits)
+}
+
+fn find_owned_internal(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
     let seq = Arc::new(SequenceData::from_owned(sequence));
-    find_with_sequence(seq, min_tetrads, min_score)
+    find_with_sequence(seq, min_tetrads, min_score, limits)
 }
 
-fn find_owned_chunked(sequence: String, min_tetrads: usize, min_score: i32) -> Vec<G4> {
+fn find_owned_chunked(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    chunk_size: usize,
+) -> Vec<G4> {
     let len = sequence.len();
-    if len <= CHUNK_SIZE {
-        return find_owned_internal(sequence, min_tetrads, min_score);
+    if len <= chunk_size {
+        return find_owned_internal(sequence, min_tetrads, min_score, limits);
     }
-    let overlap = compute_chunk_overlap(min_tetrads);
+    let overlap = compute_chunk_overlap(min_tetrads, limits);
     let mut start = 0usize;
     let mut chunks = Vec::new();
     while start < len {
-        let primary_end = (start + CHUNK_SIZE).min(len);
+        let primary_end = (start + chunk_size).min(len);
         let window_end = (primary_end + overlap).min(len);
         let chunk = sequence[start..window_end].to_string();
         let is_last = primary_end == len;
@@ -421,7 +503,7 @@ fn find_owned_chunked(sequence: String, min_tetrads: usize, min_score: i32) -> V
     let merged: Vec<G4> = chunks
         .into_par_iter()
         .flat_map_iter(|(offset, cutoff, is_last, chunk)| {
-            let hits = find_owned_internal(chunk, min_tetrads, min_score);
+            let hits = find_owned_internal(chunk, min_tetrads, min_score, limits);
             hits.into_iter().filter_map(move |mut g4| {
                 shift_g4(&mut g4, offset);
                 if !is_last && g4.start >= cutoff {
@@ -434,9 +516,20 @@ fn find_owned_chunked(sequence: String, min_tetrads: usize, min_score: i32) -> V
     consolidate_g4s(merged)
 }
 
-pub(crate) fn compute_chunk_overlap(min_tetrads: usize) -> usize {
-    let required = maximum_length(min_tetrads.max(4));
-    CHUNK_OVERLAP_BASE.max(required + 64)
+pub(crate) fn chunk_size_for_limits(limits: ScanLimits) -> usize {
+    let desired = limits
+        .max_g4_length
+        .saturating_add(WINDOW_PADDING_BP);
+    desired.clamp(WINDOW_MIN_BP, WINDOW_MAX_BP)
+}
+
+pub(crate) fn compute_chunk_overlap(min_tetrads: usize, limits: ScanLimits) -> usize {
+    let required = maximum_length(min_tetrads.max(4), limits);
+    let chunk = chunk_size_for_limits(limits);
+    let extra = required
+        .saturating_sub(chunk)
+        .saturating_add(OVERLAP_MARGIN_BP);
+    extra.max(chunk)
 }
 
 pub(crate) fn shift_g4(g4: &mut G4, offset: usize) {
@@ -448,9 +541,14 @@ pub(crate) fn shift_g4(g4: &mut G4, offset: usize) {
     g4.tetrad4 += offset;
 }
 
-fn find_with_sequence(seq: Arc<SequenceData>, min_tetrads: usize, min_score: i32) -> Vec<G4> {
+fn find_with_sequence(
+    seq: Arc<SequenceData>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
     let mut cands = VecDeque::new();
-    seed_queue(&mut cands, seq.clone(), min_tetrads);
+    seed_queue(&mut cands, seq.clone(), min_tetrads, limits);
     let mut raw_g4s = Vec::new();
 
     while let Some(cand) = cands.pop_front() {
@@ -469,12 +567,30 @@ fn find_with_sequence(seq: Arc<SequenceData>, min_tetrads: usize, min_score: i32
 }
 
 pub fn find_csv(sequence: &str, min_tetrads: usize, min_score: i32) -> String {
-    let results = find(sequence, min_tetrads, min_score);
+    find_csv_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
+}
+
+pub fn find_csv_with_limits(
+    sequence: &str,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> String {
+    let results = find_with_limits(sequence, min_tetrads, min_score, limits);
     render_csv(&results)
 }
 
 pub fn find_csv_owned(sequence: String, min_tetrads: usize, min_score: i32) -> String {
-    let results = find_owned(sequence, min_tetrads, min_score);
+    find_csv_owned_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
+}
+
+pub fn find_csv_owned_with_limits(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> String {
+    let results = find_owned_with_limits(sequence, min_tetrads, min_score, limits);
     render_csv(&results)
 }
 
@@ -556,7 +672,17 @@ pub fn write_parquet<W: Write + Send + 'static>(
     min_score: i32,
     writer: W,
 ) -> Result<(), ExportError> {
-    let results = find(sequence, min_tetrads, min_score);
+    write_parquet_with_limits(sequence, min_tetrads, min_score, ScanLimits::default(), writer)
+}
+
+pub fn write_parquet_with_limits<W: Write + Send + 'static>(
+    sequence: &str,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    writer: W,
+) -> Result<(), ExportError> {
+    let results = find_with_limits(sequence, min_tetrads, min_score, limits);
     write_parquet_from_results(&results, writer)
 }
 
@@ -566,7 +692,17 @@ pub fn write_parquet_owned<W: Write + Send + 'static>(
     min_score: i32,
     writer: W,
 ) -> Result<(), ExportError> {
-    let results = find_owned(sequence, min_tetrads, min_score);
+    write_parquet_owned_with_limits(sequence, min_tetrads, min_score, ScanLimits::default(), writer)
+}
+
+pub fn write_parquet_owned_with_limits<W: Write + Send + 'static>(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    writer: W,
+) -> Result<(), ExportError> {
+    let results = find_owned_with_limits(sequence, min_tetrads, min_score, limits);
     write_parquet_from_results(&results, writer)
 }
 
@@ -750,7 +886,7 @@ mod tests {
         let results = find(sequence, 4, 17);
         assert_eq!(results.len(), 1);
         let g = &results[0];
-        assert_eq!(g.start, 0);
+        assert_eq!(g.start, 1);
         assert_eq!(g.tetrads, 4);
         assert_eq!(g.y1, 1);
         assert_eq!(g.y2, 1);
@@ -839,5 +975,28 @@ mod tests {
             }
         }
         fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn chunked_search_matches_internal_results() {
+        let limits = ScanLimits::default();
+        let chunk_size = chunk_size_for_limits(limits);
+        assert!(chunk_size < 100);
+        let mut sequence = String::new();
+        sequence.push_str(&"A".repeat(chunk_size - 5));
+        sequence.push_str("GGGGAGGGGAGGGGAGGGG");
+        sequence.push_str(&"A".repeat(chunk_size / 2));
+        sequence.push_str("GGGGAGGGGAGGGGAGGGG");
+        sequence.push_str(&"T".repeat(10));
+
+        let chunked = find_owned_chunked(sequence, 4, 17, limits, chunk_size);
+
+        let starts: Vec<_> = chunked.iter().map(|g| g.start).collect();
+        assert_eq!(starts.len(), 2);
+        let expected_starts = vec![
+            chunk_size - 5 + 1,
+            (chunk_size - 5) + "GGGGAGGGGAGGGGAGGGG".len() + chunk_size / 2 + 1,
+        ];
+        assert_eq!(starts, expected_starts);
     }
 }

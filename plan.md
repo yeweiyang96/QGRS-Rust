@@ -1,36 +1,50 @@
-**行动框架**
+**优化目标**
 
-1. 现有依赖：`memmap2` 负责零拷贝访问、`memchr` 在 ARM64 上自带 NEON SIMD；它们已经自动利用 M1 的指令集与预取机制，所以不必改动。
-2. 识别瓶颈：当 FASTA 只有一个染色体（例如 aaa.fa）时，所有工作都落在单线程的 `seed_queue`/`G4Candidate` 扩展上，CPU 核心无法同时工作。
-3. 设计并行策略：保持单个映射视图不变的前提下拆分工作负载，让多个核心在不同窗口上并行扫描，再合并候选。
+1. 统一“最大 G-run 长度 = 10 / 最大 G4 长度 = 45”的约束，并允许通过 CLI 参数 `--max-g-run`、`--max-g4-length` 自定义，默认 10/45。
+2. 把 mmap 与 stream 两条管线都限制在 ≤64bp 的小窗口内，以提升多核利用率、减少无效扫描。
+3. 在种子、候选扩展与合并阶段全面裁剪超出约束的情况，确保计算仅集中在潜在 G4 区域。
+4. 对 CLI 输入做动态校验：`max_g4_length ≥ 4 * min_tetrads` 且 `max_g_run ≥ min_tetrads`，否则提前报错并提示用户。
 
-**加速建议**
+**实施步骤**
 
-- **Release 编译 + M1 优化开关**：确保执行 `cargo run --release`，并在 `.cargo/config.toml` 中加入
+1. 常量与参数结构
 
-  ```toml
-  [build]
-  rustflags = ["-C", "target-cpu=native"]
-  ```
+- 在 `src/qgrs/mod.rs` 定义 `DEFAULT_MAX_G4_LENGTH = 45`、`DEFAULT_MAX_G_RUN = 10`。
+- 为 `find`/`find_owned`、chunk/stream 入口添加 `(max_g4_length, max_g_run)` 参数；默认使用常量，CLI 可覆盖。
 
-  这样 LLVM 会针对 Apple M1 的 big.LITTLE 架构生成 NEON 指令，提高 `memchr`、分支预测等底层性能。
+2. Clamp Chunk Windows（≤64bp）
 
-- **按染色体并行**：如果 FASTA 含多条染色体，直接用 `rayon::par_iter()` 包裹 `load_sequences_from_path` 返回的 `Vec<ChromSequence>`，每个条目独立运行 `find_owned` 并写出结果即可——数据完全隔离，无需同步。当前 CLI 可以在 `process_fasta_file` 的 mmap 分支中加入：
+- 将 `CHUNK_SIZE` 调整为 `max_g4_length + safety`（建议 64）。
+- `compute_chunk_overlap`、stream scheduler overlap 统一采用 `max_g4_length + padding`，确保跨 chunk 的候选不会被截断。
 
-  ```rust
-  sequences.par_iter().try_for_each(|chrom| { ... })
-  ```
+3. Seed Filter
 
-  这样多核在多个染色体上同时工作。
+- 修改 `GRunScanner` / `seed_queue`：忽略连续 G-run 长度 > `max_g_run` 的片段。
+- 只枚举满足 `4 * tetrads ≤ max_g4_length` 的 tetrad 组合，过长的直接跳过。
 
-- **单染色体拆分窗口**：对于像 aaa.fa 这种只有一条序列的情况，可以把序列按固定大小（例如 2–4 MB）划成块，并在块之间加入 `(max_tetrads * 4 + max_loop)` 的重叠，以免跨块 G-run 被截断。每个块用 `rayon::scope` 派发到线程池运行 `find_slice(chunk_range)`, 最后把所有候选合并再执行 `consolidate_g4s` 去重。实现要点：
+4. Candidate Guardrails
 
-  1. 预先计算块边界并保留 `start_offset`，传入 `find_with_sequence` 的变体，使候选位置保持全局坐标。
-  2. 合并阶段按 `start` 排序，复用现有 `consolidate_g4s`。
-  3. 大序列 memory-map 后仍旧是同一个 `&[u8]` 视图，不会额外占内存。
+- `G4Candidate::find_loop_lengths_from` / `expand` 在 `partial_length > max_g4_length` 时立即停止扩展；loop 搜索区间基于剩余预算裁剪。
+- 若某个 tetrad 区段长度会超过 `max_g_run`，提前放弃该分支。
 
-- **流式模式的并行**：`stream` 目前是单线程滑动窗口。若要并行，可在读取器层面把 FASTA 分块（同样带重叠）后用 `rayon::ThreadPool` 为每个块启动一个新的 `StreamDetector`，再归并结果。由于窗口依赖前缀，下一个块必须携带前一块的尾巴才能保持准确度。
+5. Scoring & Consolidation Adjustments
 
-- **多进程方案**：若 Rust 端修改成本太高，可以在 shell 层面把超长 FASTA 切片（`split -l`）后并行启动多个 `qgrs` 实例，每个实例处理不同区段并写出临时结果，再在外部脚本中归并。M1 有 4 颗性能核，可同时跑 4 个进程。
+- `find_owned_chunked`、stream chunk merge 全部使用新的窗口/overlap 参数。
+- 复核 `consolidate_g4s` 在小窗口场景仍可正确归并；必要时在合并前按 `start` 排序。
 
-总之，`memmap2`/`memchr` 已自动利用 M1 的硬件；要进一步提速，需要显式在 G4 搜索阶段引入 `rayon` 或多进程，把单染色体的扫描任务拆成可并发的窗口。你可以先尝试最简单的“多染色体并行 + release + target-cpu=native”，再视需要实现单染色体窗口化。
+6. CLI 校验与文档
+
+- `src/bin/qgrs.rs` 新增 `--max-g4-length`、`--max-g-run`；解析后校验 `max_g4_length ≥ 4 * min_tetrads`、`max_g_run ≥ min_tetrads`，否则返回 usage。
+- README/usage 补充新参数说明及推荐范围（如 32–64bp / 8–12bp）。
+
+7. 测试与基准
+
+- 单测覆盖：默认参数、自定义合法参数、非法输入报错、chunk/stream 结果一致性。
+- `cargo test` 全量回归。
+- 基准建议：对 `aaa.fa` 分别运行 `--max-g4-length 32|48|64`、`--max-g-run 8|10|12`，记录 mmap/stream 的 real/user/RSS 指标，为 M1 Pro (64GB) 选出最佳配置。
+
+**验证指标**
+
+- CLI 解析：错误输入能即时报错；默认值与旧版行为一致。
+- 扫描性能：stream 模式相对旧版至少提升 ~20%，内存占用下降；mmap 模式在长染色体场景下接近 stream 性能。
+- 结果一致性：不同参数组合下，`stream` 与 `find_owned` 仍给出相同的 G4 集合。

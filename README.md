@@ -12,6 +12,9 @@ cargo build --release --bin qgrs
 cargo run --release --bin qgrs -- --sequence GGGGAGGGGAGGGGAGGGG --min-tetrads 4 --min-score 17 --format csv
 # or feed a FASTA/plain sequence, pick mmap/stream input, and emit one file per chromosome
 cargo run --release --bin qgrs -- --file path/to/sequence.fa --mode stream --min-tetrads 4 --format parquet --output-dir ./qgrs_out
+
+# clamp loops/runs explicitly (defaults: max G-run 10, max G4 length 45bp)
+cargo run --release --bin qgrs -- --sequence ... --max-g-run 12 --max-g4-length 60
 ```
 
 ### Recommended workflow
@@ -28,6 +31,8 @@ cargo run --release --bin qgrs -- --file path/to/sequence.fa --mode stream --min
 
 - `src/qgrs/` owns everything: sequence normalization, mmap/stream loaders, the translated `find` logic, and CSV/Parquet exporters.
 - `src/bin/qgrs.rs` is the only shipping CLI. It accepts inline sequences or FASTA/plain files, splits FASTA inputs by chromosome header, and provides knobs for minimum tetrads, g-score, output format, input mode, and the destination (`--output` or `--output-dir`).
+- CLI validations: `--max-g-run` and `--max-g4-length` default to 10/45 and must satisfy `max_g_run ≥ min_tetrads` and `max_g4_length ≥ 4 * min_tetrads`; invalid combinations are rejected with a usage hint.
+- CSV/Parquet exports report 1-based, inclusive `start`/`end` coordinates so they line up with common genome browsers.
 - `memchr` accelerates the internal `GRunScanner`, which seeds every candidate G-run without copying the input slice.
 - `memmap2` and `BufReader` cover the two input strategies so huge genomes can be processed without buffering entire files into RAM.
 - `src/qgrs/stream.rs` implements the true streaming pipeline: FASTA bytes are parsed incrementally, candidates are expanded directly from a sliding window, and no chromosome-sized `String` is ever materialized when `--mode stream` is selected.
@@ -37,5 +42,15 @@ cargo run --release --bin qgrs -- --file path/to/sequence.fa --mode stream --min
 ```bash
 cargo test
 ```
+
+### Benchmarks (suggested)
+
+```bash
+# swap lengths/runs to gauge sensitivity
+time cargo run --release --bin qgrs -- --file aaa.fa --mode mmap --max-g4-length 32 --max-g-run 8 --output-dir out
+time cargo run --release --bin qgrs -- --file aaa.fa --mode stream --max-g4-length 45 --max-g-run 10 --output-dir out
+```
+
+Record `real`/`user` time and RSS for the combinations that matter to your dataset (e.g., 32/8 vs 45/10 vs 60/12) to pick the best defaults per hardware.
 
 Use `cargo run --release` for production input sizes; this enables full compiler optimizations and targets the M1's vector units.
