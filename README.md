@@ -1,56 +1,166 @@
-# QGRS-Rust
+# QGRS-Rust <img alt="DNA icon" align="right" width="90" src="https://img.shields.io/badge/G4-scan-blueviolet?logo=databricks&logoColor=white" />
 
-Rust port of the original `qgrs.cpp` logic. The crate now focuses solely on discovering G-quadruplexes (G4s) and exporting the hits as CSV or Parquet. The legacy `find-repeat-G` binary is kept only as a stub; run the `qgrs` target instead.
+<div align="center">
 
-## Usage
+**Fast, strict, and scriptable G-quadruplex hunter written in Rust**  
+![Rust 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust&logoColor=white)
+![Platforms macOS/Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey?logo=apple&logoColor=white)
+![Outputs CSV / Parquet](https://img.shields.io/badge/output-CSV%20%7C%20Parquet-0e83cd)
+![Mode mmap / stream](https://img.shields.io/badge/mode-mmap%20%7C%20stream-6f42c1)
+
+</div>
+
+QGRS-Rust is a Rust-native port of the original `qgrs.cpp` pipeline for discovering G-quadruplexes (G4s). It accepts inline sequences or FASTA/plain files, applies the legacy scoring logic, and writes chromosome-aware hits as CSV or Parquet. The old `find-repeat-G` binary exists only as a stub—`qgrs` is the supported CLI.
+
+## Table of contents
+
+- [✨ Features](#-features)
+- [🧰 Requirements](#-requirements)
+- [⚙️ Build](#️-build)
+- [🧪 Usage](#-usage)
+  - [Quick recipes](#quick-recipes)
+  - [CLI reference](#cli-reference)
+  - [Output schema](#output-schema)
+- [✅ Testing & QA](#-testing--qa)
+- [📊 Benchmarking tips](#-benchmarking-tips)
+
+## ✨ Features
+
+- Rust scanner mirrors the legacy scoring heuristics while benefiting from zero-copy iterators and Rayon parallelism.
+- Memory-mapped (`mmap`) and streaming (`stream`) readers let you pick the best strategy per dataset.
+- CSV/Parquet exporters always report 1-based, inclusive coordinates for genome-browser compatibility.
+- CLI validation enforces sane tetrad, loop, and window settings to avoid silent misconfiguration.
+
+## 🧰 Requirements
+
+- Rust toolchain 1.75 or newer (install via [`rustup`](https://rustup.rs)).
+- `cargo` is required for building, running, and testing.
+- macOS and Linux are tested; Windows should work via WSL2.
+
+## ⚙️ Build
 
 ```bash
-# build once (optimized)
+# clone and enter the workspace
+git clone https://github.com/<your-org>/QGRS-Rust.git
+cd QGRS-Rust
+
+# debug build (fast iteration)
+cargo build --bin qgrs
+
+# optimized binary for large genomes
 cargo build --release --bin qgrs
 
-# G-quadruplex search mirroring qgrs.cpp (CSV output by default)
-cargo run --release --bin qgrs -- --sequence GGGGAGGGGAGGGGAGGGG --min-tetrads 4 --min-score 17 --format csv
-# or feed a FASTA/plain sequence, pick mmap/stream input, and emit one file per chromosome
-cargo run --release --bin qgrs -- --file path/to/sequence.fa --mode stream --min-tetrads 4 --format parquet --output-dir ./qgrs_out
-
-# clamp loops/runs explicitly (defaults: max G-run 10, max G4 length 45bp)
-cargo run --release --bin qgrs -- --sequence ... --max-g-run 12 --max-g4-length 60
+# the optimized binary lives here after a release build
+target/release/qgrs --help
 ```
 
-### Recommended workflow
+> Tip: use `cargo install --path . --bin qgrs` if you want the binary on your `~/.cargo/bin` for reuse across projects.
 
-1. 构建：`cargo build --release --bin qgrs`
-2. 运行
-   - 处理内联序列：`target/release/qgrs --sequence ...`
-   - 处理 FASTA/文本文件：`target/release/qgrs --file input.fa --mode mmap|stream --output-dir out_dir ...`
-3. 选择输出
-   - CSV（内联序列默认 stdout，或使用 `--output` 指定文件；文件输入会在 `--output-dir` 下按染色体生成多个 CSV）
-   - Parquet（内联序列需 `--output`，文件输入在 `--output-dir` 下生成多个 Parquet）
+## 🧪 Usage
 
-## Implementation highlights
+`qgrs` accepts either an inline sequence (`--sequence`) or an input file (`--file`). FASTA inputs are split per chromosome header, and each slice is processed independently. If you provide a file, choose either the memory-mapped (`mmap`) or buffered streaming (`stream`) pipeline with `--mode`. All examples below assume you already built the release binary (`target/release/qgrs`) or installed it as `qgrs`; use `cargo run --release --bin qgrs -- …` only when iterating locally. The banner below comes straight from `src/bin/qgrs.rs` so it always matches the binary.
 
-- `src/qgrs/` owns everything: sequence normalization, mmap/stream loaders, the translated `find` logic, and CSV/Parquet exporters.
-- `src/bin/qgrs.rs` is the only shipping CLI. It accepts inline sequences or FASTA/plain files, splits FASTA inputs by chromosome header, and provides knobs for minimum tetrads, g-score, output format, input mode, and the destination (`--output` or `--output-dir`).
-- CLI validations: `--max-g-run` and `--max-g4-length` default to 10/45 and must satisfy `max_g_run ≥ min_tetrads` and `max_g4_length ≥ 4 * min_tetrads`; invalid combinations are rejected with a usage hint.
-- CSV/Parquet exports report 1-based, inclusive `start`/`end` coordinates so they line up with common genome browsers.
-- `memchr` accelerates the internal `GRunScanner`, which seeds every candidate G-run without copying the input slice.
-- `memmap2` and `BufReader` cover the two input strategies so huge genomes can be processed without buffering entire files into RAM.
-- `src/qgrs/stream.rs` implements the true streaming pipeline: FASTA bytes are parsed incrementally, candidates are expanded directly from a sliding window, and no chromosome-sized `String` is ever materialized when `--mode stream` is selected.
+```
+Usage: qgrs -- [--sequence <SEQ> | --file <PATH>] [options]
+Options:
+   --sequence <SEQ>       Inline DNA/RNA sequence to scan
+   --file <PATH>          Read sequences from FASTA (chromosomes split independently)
+   --min-tetrads <N>      Minimum tetrads to seed (default 2)
+   --min-score <S>        Minimum g-score (default 17)
+   --max-g-run <N>        Maximum allowed G-run length (default 10)
+   --max-g4-length <N>    Maximum allowed G4 length in bp (default 45)
+   --format <csv|parquet> Output format (default csv)
+   --output <PATH>        Destination file when using --sequence (required for parquet)
+   --output-dir <DIR>     Directory for per-chromosome exports when using --file
+   --mode <mmap|stream>   Input mode when using --file (default mmap)
+   --help                 Show this message
+```
 
-## Testing
+### Quick recipes
 
 ```bash
+# 1. Quick sanity check against a short inline sequence
+target/release/qgrs \
+   --sequence GGGGAGGGGAGGGGAGGGG \
+   --min-tetrads 4 \
+   --min-score 17 \
+   --format csv
+
+# 2. Process a FASTA file using mmap and emit CSV files per chromosome
+target/release/qgrs \
+   --file data/genome.fa \
+   --mode mmap \
+   --min-tetrads 4 \
+   --min-score 20 \
+   --output-dir ./qgrs_csv
+
+# 3. Stream extremely large FASTA with Parquet output
+target/release/qgrs \
+   --file hg38.fa \
+   --mode stream \
+   --min-tetrads 3 \
+   --max-g-run 12 \
+   --max-g4-length 60 \
+   --format parquet \
+   --output-dir ./qgrs_parquet
+
+# 4. Clamp loop and run lengths for custom heuristics while writing to stdout
+target/release/qgrs \
+   --sequence GGGGTTTTGGGGTTTTGGGGTTTTGGGG \
+   --max-g-run 8 \
+   --max-g4-length 45 \
+   --output -
+```
+
+### CLI reference
+
+| Flag                      | Description                                                                                | Default                  |
+| ------------------------- | ------------------------------------------------------------------------------------------ | ------------------------ |
+| `--sequence <SEQ>`        | Inline DNA sequence to scan (mutually exclusive with `--file`).                            | _none_                   |
+| `--file <PATH>`           | FASTA or plain-text file containing one or more sequences.                                 | _none_                   |
+| `--mode <mmap\|stream>`   | File ingestion strategy; `mmap` favors fast disks, `stream` lowers RAM.                    | `mmap`                   |
+| `--min-tetrads <INT>`     | Minimum number of stacked tetrads required for a hit.                                      | `2`                      |
+| `--min-score <INT>`       | Minimum legacy G-score threshold.                                                          | `17`                     |
+| `--max-g-run <INT>`       | Upper bound for contiguous G-run length (must be ≥ `min-tetrads`).                         | `10`                     |
+| `--max-g4-length <INT>`   | Upper bound for the full quadruplex length (must be ≥ `4 * min_tetrads`).                  | `45`                     |
+| `--format <csv\|parquet>` | Output encoding. CSV defaults to stdout for inline sequences; Parquet requires a file/dir. | `csv`                    |
+| `--output <FILE\|- >`     | Single output file (or `-` for stdout) when scanning inline sequences.                     | stdout for CSV           |
+| `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
+
+The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet.
+
+### Output schema
+
+Both exporters emit the same fields (see `render_csv` and `write_parquet_from_results` in `src/qgrs/mod.rs`):
+
+| Column           | Meaning                                                                                 |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| `start`          | 1-based inclusive start coordinate of the hit within the processed sequence/chromosome. |
+| `end`            | 1-based inclusive end coordinate (`start + length - 1`).                                |
+| `length`         | Total number of bases spanned by the quadruplex.                                        |
+| `tetrads`        | Count of stacked tetrads contributing to the hit.                                       |
+| `y1`, `y2`, `y3` | Loop lengths between successive G-runs (0 means no spacer).                             |
+| `gscore`         | Legacy G-score used for filtering and ranking candidates.                               |
+| `sequence`       | Exact G4 motif sequence extracted from the input.                                       |
+
+CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences).
+
+## Testing & QA
+
+```bash
+# unit tests
 cargo test
+
+# lint + formatting (optional but recommended before sending patches)
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### Benchmarks (suggested)
+## Benchmarking tips
 
 ```bash
-# swap lengths/runs to gauge sensitivity
-time cargo run --release --bin qgrs -- --file aaa.fa --mode mmap --max-g4-length 32 --max-g-run 8 --output-dir out
-time cargo run --release --bin qgrs -- --file aaa.fa --mode stream --max-g4-length 45 --max-g-run 10 --output-dir out
+time target/release/qgrs --file aaa.fa --mode mmap   --max-g4-length 32 --max-g-run 8  --output-dir out-mmap
+time target/release/qgrs --file aaa.fa --mode stream --max-g4-length 45 --max-g-run 10 --output-dir out-stream
 ```
 
-Record `real`/`user` time and RSS for the combinations that matter to your dataset (e.g., 32/8 vs 45/10 vs 60/12) to pick the best defaults per hardware.
-
-Use `cargo run --release` for production input sizes; this enables full compiler optimizations and targets the M1's vector units.
+Track `real` time, CPU%, and RSS with your preferred profiler to decide whether `mmap` or `stream` is better for your environment. Always benchmark with `--release` builds to enable full optimizations.
