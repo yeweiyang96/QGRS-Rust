@@ -1,8 +1,7 @@
 # QGRS-Rust <img alt="DNA icon" align="right" width="90" src="https://img.shields.io/badge/G4-scan-blueviolet?logo=databricks&logoColor=white" />
 
 <div align="center">
-
-**Fast, strict, and scriptable G-quadruplex hunter written in Rust**  
+ 
 ![Rust 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust&logoColor=white)
 ![Platforms macOS/Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey?logo=apple&logoColor=white)
 ![Outputs CSV / Parquet](https://img.shields.io/badge/output-CSV%20%7C%20Parquet-0e83cd)
