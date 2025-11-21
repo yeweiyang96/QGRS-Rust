@@ -7,7 +7,7 @@ pub type ProgressReporterHandle = Arc<dyn ProgressReporter + Send + Sync>;
 
 pub trait ProgressReporter: Send + Sync {
     fn start_chromosome(&self, _name: &str, _length: usize) {}
-    fn seed_progress(&self, _name: &str, _processed: usize, _total: usize) {}
+    fn update_phase(&self, _name: &str, _phase: ProgressPhase, _processed: usize, _total: usize) {}
     fn finish_chromosome(&self, _name: &str) {}
 }
 
@@ -18,4 +18,11 @@ impl ProgressReporter for NoopProgressReporter {}
 
 pub fn noop_progress_handle() -> ProgressReporterHandle {
     Arc::new(NoopProgressReporter)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressPhase {
+    Seeding,
+    Expanding,
+    Filtering,
 }

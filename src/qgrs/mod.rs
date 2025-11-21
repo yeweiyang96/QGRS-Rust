@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::ProgressReporterHandle;
+use crate::{ProgressPhase, ProgressReporterHandle};
 
 use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
@@ -73,13 +73,14 @@ impl ProgressScope {
         self.offset.saturating_add(local_start).min(total - 1)
     }
 
-    pub(super) fn report_seed(&self, local_start: usize) {
+    fn report_phase(&self, phase: ProgressPhase, local_start: usize) {
         let total = self.current_total();
         if total == 0 {
             return;
         }
         let absolute = self.absolute_position(local_start, total);
-        self.reporter.seed_progress(&self.name, absolute, total);
+        self.reporter
+            .update_phase(&self.name, phase, absolute, total);
     }
 
     pub(super) fn start(&self) {
@@ -89,8 +90,21 @@ impl ProgressScope {
 
     pub(super) fn finish(&self) {
         let total = self.current_total().max(1);
-        self.reporter.seed_progress(&self.name, total, total);
+        self.reporter
+            .update_phase(&self.name, ProgressPhase::Filtering, total, total);
         self.reporter.finish_chromosome(&self.name);
+    }
+
+    pub(super) fn on_seeding(&self, local_start: usize) {
+        self.report_phase(ProgressPhase::Seeding, local_start);
+    }
+
+    pub(super) fn on_expanding(&self, local_start: usize) {
+        self.report_phase(ProgressPhase::Expanding, local_start);
+    }
+
+    pub(super) fn on_filtering(&self, local_start: usize) {
+        self.report_phase(ProgressPhase::Filtering, local_start);
     }
 }
 
@@ -706,9 +720,13 @@ fn find_with_sequence(
     let mut raw_g4s = Vec::new();
 
     while let Some(cand) = cands.pop_front() {
-        if cand.is_seed() {
-            if let Some(scope) = progress.as_ref() {
-                scope.report_seed(cand.start);
+        if let Some(scope) = progress.as_ref() {
+            if cand.is_seed() {
+                scope.on_seeding(cand.start);
+            } else if !cand.complete() {
+                scope.on_expanding(cand.start);
+            } else {
+                scope.on_filtering(cand.start);
             }
         }
         if cand.complete() {

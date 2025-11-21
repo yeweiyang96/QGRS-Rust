@@ -4,12 +4,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
+use atty::Stream;
 use qgrs_rust::{
-    DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ProgressReporterHandle, ScanLimits, qgrs,
+    DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ProgressPhase, ProgressReporter,
+    ProgressReporterHandle, ScanLimits, qgrs,
 };
-use qgrs_rust::ProgressReporter;
+use rayon::current_num_threads;
 use rayon::prelude::*;
 
 fn main() {
@@ -460,143 +461,207 @@ impl OutputFormat {
 }
 
 struct TerminalProgressReporter {
-    state: Mutex<ProgressDisplayState>,
+    enabled: bool,
+    state: Mutex<PanelState>,
 }
 
 impl TerminalProgressReporter {
-    const RENDER_INTERVAL: Duration = Duration::from_millis(80);
-
     fn new() -> Self {
-        let initial = Instant::now()
-            .checked_sub(Self::RENDER_INTERVAL)
-            .unwrap_or_else(Instant::now);
+        let enabled = atty::is(Stream::Stderr);
+        let slots = current_num_threads().max(1);
         Self {
-            state: Mutex::new(ProgressDisplayState::new(initial)),
+            enabled,
+            state: Mutex::new(PanelState::new(slots, enabled)),
         }
     }
 
     fn new_handle() -> ProgressReporterHandle {
         Arc::new(Self::new()) as ProgressReporterHandle
     }
+
+    fn update_line(&self, name: &str, phase: ProgressPhase, processed: usize, total: usize) {
+        if !self.enabled {
+            return;
+        }
+        let mut panel = self.state.lock().unwrap();
+        panel.update_current_thread(name, phase, processed, total);
+    }
+
+    fn mark_idle(&self) {
+        if !self.enabled {
+            return;
+        }
+        let mut panel = self.state.lock().unwrap();
+        panel.mark_current_thread_idle();
+    }
 }
 
 impl ProgressReporter for TerminalProgressReporter {
     fn start_chromosome(&self, name: &str, total: usize) {
-        let mut state = self.state.lock().unwrap();
-        state.touch_entry(name).reset(total);
-        state.render(false);
+        self.update_line(name, ProgressPhase::Seeding, 0, total);
     }
 
-    fn seed_progress(&self, name: &str, processed: usize, total: usize) {
-        let mut state = self.state.lock().unwrap();
-        state.touch_entry(name).update(processed, total);
-        state.render(false);
+    fn update_phase(&self, name: &str, phase: ProgressPhase, processed: usize, total: usize) {
+        self.update_line(name, phase, processed, total);
     }
 
-    fn finish_chromosome(&self, name: &str) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(entry) = state.entries.get_mut(name) {
-            entry.complete();
-        }
-        state.render(true);
-        state.remove_entry(name);
+    fn finish_chromosome(&self, _name: &str) {
+        self.mark_idle();
     }
 }
 
-struct ProgressDisplayState {
-    entries: HashMap<String, ProgressEntry>,
-    order: Vec<String>,
-    last_render: Instant,
+struct PanelState {
+    lines: Vec<LineState>,
+    thread_map: HashMap<std::thread::ThreadId, usize>,
+    initialized: bool,
+    enabled: bool,
 }
 
-impl ProgressDisplayState {
-    fn new(initial: Instant) -> Self {
+impl PanelState {
+    fn new(slots: usize, enabled: bool) -> Self {
+        let count = slots.max(1);
         Self {
-            entries: HashMap::new(),
-            order: Vec::new(),
-            last_render: initial,
+            lines: vec![LineState::default(); count],
+            thread_map: HashMap::new(),
+            initialized: false,
+            enabled,
         }
     }
 
-    fn touch_entry(&mut self, name: &str) -> &mut ProgressEntry {
-        self.entries.entry(name.to_string()).or_insert_with(|| {
-            self.order.push(name.to_string());
-            ProgressEntry::default()
-        })
-    }
-
-    fn remove_entry(&mut self, name: &str) {
-        if self.entries.remove(name).is_some() {
-            self.order.retain(|label| label != name);
-            self.render(true);
-            if self.entries.is_empty() {
-                self.clear_line();
-            }
-        }
-    }
-
-    fn render(&mut self, force: bool) {
-        let now = Instant::now();
-        if !force
-            && now.duration_since(self.last_render) < TerminalProgressReporter::RENDER_INTERVAL
-        {
+    fn update_current_thread(
+        &mut self,
+        name: &str,
+        phase: ProgressPhase,
+        processed: usize,
+        total: usize,
+    ) {
+        if !self.enabled {
             return;
         }
-        self.last_render = now;
-        let mut stderr = io::stderr();
-        if self.entries.is_empty() {
-            let _ = write!(stderr, "\r\x1b[K");
-            let _ = stderr.flush();
-            return;
+        if let Some(slot) = self.ensure_slot_for_current_thread() {
+            self.lines[slot].content = LineContent::Active {
+                chromosome: name.to_string(),
+                phase,
+                processed,
+                total: total.max(1),
+            };
+            self.render();
         }
-        let mut parts = Vec::with_capacity(self.order.len());
-        for name in &self.order {
-            if let Some(entry) = self.entries.get(name) {
-                parts.push(entry.format(name));
-            }
-        }
-        let line = parts.join(" | ");
-        let _ = write!(stderr, "\r{line}\x1b[K");
-        let _ = stderr.flush();
     }
 
-    fn clear_line(&self) {
+    fn mark_current_thread_idle(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        if let Some(slot) = self.slot_for_current_thread() {
+            self.lines[slot].content = LineContent::Idle;
+            self.render();
+        }
+    }
+
+    fn ensure_slot_for_current_thread(&mut self) -> Option<usize> {
+        let id = current_thread_id();
+        if let Some(&slot) = self.thread_map.get(&id) {
+            return Some(slot);
+        }
+        if let Some(slot) = self.lines.iter().position(|line| line.thread_id.is_none()) {
+            self.lines[slot].thread_id = Some(id);
+            self.thread_map.insert(id, slot);
+            return Some(slot);
+        }
+        None
+    }
+
+    fn slot_for_current_thread(&mut self) -> Option<usize> {
+        let id = current_thread_id();
+        self.thread_map.get(&id).copied()
+    }
+
+    fn render(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let lines = self.lines.len();
+        if lines == 0 {
+            return;
+        }
         let mut stderr = io::stderr();
-        let _ = write!(stderr, "\r\x1b[K");
+        if !self.initialized {
+            for _ in 0..lines {
+                let _ = writeln!(stderr);
+            }
+            self.initialized = true;
+        }
+        let _ = write!(stderr, "\x1b[{}F", lines);
+        for (idx, line) in self.lines.iter().enumerate() {
+            let formatted = line.format(idx);
+            let _ = write!(stderr, "\x1b[2K{formatted}\n");
+        }
         let _ = stderr.flush();
     }
 }
 
-#[derive(Default)]
-struct ProgressEntry {
-    total: usize,
-    processed: usize,
+#[derive(Clone)]
+struct LineState {
+    thread_id: Option<std::thread::ThreadId>,
+    content: LineContent,
 }
 
-impl ProgressEntry {
-    fn reset(&mut self, total: usize) {
-        self.total = total.max(1);
-        self.processed = 0;
+impl Default for LineState {
+    fn default() -> Self {
+        Self {
+            thread_id: None,
+            content: LineContent::Idle,
+        }
     }
+}
 
-    fn update(&mut self, processed: usize, total: usize) {
-        self.total = total.max(1);
-        self.processed = processed.min(self.total);
+impl LineState {
+    fn format(&self, slot_index: usize) -> String {
+        let label = format!("Thread {:02}", slot_index + 1);
+        match &self.content {
+            LineContent::Idle => format!("{label} | idle"),
+            LineContent::Active {
+                chromosome,
+                phase,
+                processed,
+                total,
+            } => {
+                let percent = if *total == 0 {
+                    0.0
+                } else {
+                    (*processed as f64 / *total as f64) * 100.0
+                };
+                format!(
+                    "{label} | {:<20} | {:>6.2}% | {}",
+                    chromosome,
+                    percent.min(100.0),
+                    phase_label(*phase)
+                )
+            }
+        }
     }
+}
 
-    fn complete(&mut self) {
-        self.processed = self.total.max(1);
-    }
+#[derive(Clone)]
+enum LineContent {
+    Idle,
+    Active {
+        chromosome: String,
+        phase: ProgressPhase,
+        processed: usize,
+        total: usize,
+    },
+}
 
-    fn format(&self, name: &str) -> String {
-        let total = self.total.max(1);
-        let processed = self.processed.min(total);
-        let percent = (processed as f64 / total as f64) * 100.0;
-        format!(
-            "{name} {:>6.2}% ({}/{})",
-            percent.min(100.0),
-            processed,
-            total
-        )
+fn phase_label(phase: ProgressPhase) -> &'static str {
+    match phase {
+        ProgressPhase::Seeding => "seeding",
+        ProgressPhase::Expanding => "expanding",
+        ProgressPhase::Filtering => "filtering",
     }
+}
+
+fn current_thread_id() -> std::thread::ThreadId {
+    std::thread::current().id()
 }
