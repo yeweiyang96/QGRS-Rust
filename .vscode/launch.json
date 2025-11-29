@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug QGRS Rust",
+            "type": "lldb",
+            "request": "launch",
+			"cargo": {
+				"args": ["build" ,"--bin", "qgrs" ]
+			},
+            "program": "${workspaceFolder}/target/debug/qgrs",
+            "args": ["--file","${workspaceFolder}/big.txt","--output-dir","${workspaceFolder}/output"],
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false,
+            "env": {},
+            "console": "integratedTerminal"
+        }
+    ]
+}

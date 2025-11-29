@@ -12,6 +12,7 @@ use memmap2::MmapOptions;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::errors::ParquetError;
 use rayon::prelude::*;
+use std::collections::HashSet;
 
 pub mod stream;
 
@@ -54,9 +55,35 @@ impl Default for ScanLimits {
 const WINDOW_MIN_BP: usize = 32;
 const WINDOW_MAX_BP: usize = 64;
 const WINDOW_PADDING_BP: usize = 8;
-const OVERLAP_MARGIN_BP: usize = 16;
+// Increased overlap margin for stream chunking experiments (was 16).
+// Larger overlap helps ensure families spanning chunk boundaries are scanned
+// within a single worker's window, reducing divergent merged boundaries.
+const OVERLAP_MARGIN_BP: usize = 128;
 
-#[derive(Clone)]
+// Debug targets: sequences (lowercase) or start positions we want to trace.
+fn debug_targets() -> HashSet<&'static str> {
+    let mut s = HashSet::new();
+    s.insert("gggtggtgctgggcctttgtgg");
+    s.insert("ggcgggcaatggcatgg");
+    s.insert("ggaagatgtggccggaggtagcaagg");
+    s.insert("ggctacactcggactttgggattcgg");
+    s.insert("gggaccgagtacgggaccgagtacgggaccagtacggg");
+    // Added stream-only sequences for targeted debugging
+    s.insert("gggggggggg");
+    s.insert("ggagggggaaaccgaagggcgg");
+    // also include the longer variant seen in stream output
+    s.insert("ggagggggaaaccgaagggcggcagg");
+    s.insert("ggactgggactgcaggggtctagctgg");
+    s.insert("ggagatgggagtgcctggtggcaccaaagg");
+    s.insert("ggaagggcattatggggcacaagg");
+    s.insert("ggagtgggttgaccgagggcggg");
+    // include duplicated short homopolymers seen in stream-only rows
+    s.insert("gggggggggg");
+    s.insert("gggggggggg");
+    s
+}
+
+#[derive(Clone, Debug)]
 struct SequenceData {
     original: Arc<String>,
     normalized: Arc<Vec<u8>>,
@@ -76,6 +103,14 @@ impl SequenceData {
         let normalized = Arc::new(sequence.to_ascii_lowercase().into_bytes());
         Self {
             original: Arc::new(sequence),
+            normalized,
+        }
+    }
+
+    fn from_bytes(normalized: Arc<Vec<u8>>) -> Self {
+        // original is not available for byte-backed sequences; leave as empty string.
+        Self {
+            original: Arc::new(String::new()),
             normalized,
         }
     }
@@ -131,7 +166,7 @@ pub(super) fn is_g(byte: u8) -> bool {
     byte == b'G' || byte == b'g'
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct G4Candidate {
     seq: Arc<SequenceData>,
     num_tetrads: usize,
@@ -205,9 +240,7 @@ impl G4Candidate {
         if self.y1 >= 0 && self.y2 < 0 {
             length += if self.y1 == 0 { 2 } else { 1 };
         } else if self.y2 >= 0 && self.y3 < 0 {
-            if self.y1 == 0 || self.y2 == 0 {
-                length += 1;
-            }
+            length += if self.y1 == 0 || self.y2 == 0 { 1 } else { 0 };
         }
         if self.y1 > 0 {
             length += self.y1;
@@ -350,10 +383,11 @@ impl G4 {
     fn from_candidate(candidate: &G4Candidate) -> Self {
         let length = candidate.length();
         let end = candidate.start + length;
-        let sequence = candidate
-            .seq
-            .slice_original(candidate.start, length)
-            .to_string();
+        // Build the output sequence directly from normalized bytes.
+        // Use unsafe UTF-8 conversion because input is ASCII (A/C/G/T/U).
+        let normalized = &candidate.seq.normalized;
+        let seq_bytes = &normalized[candidate.start..candidate.start + length];
+        let sequence = unsafe { String::from_utf8_unchecked(seq_bytes.to_vec()) };
         Self {
             start: candidate.start + 1,
             end,
@@ -393,10 +427,25 @@ fn belongs_in(g4: &G4, family: &[G4]) -> bool {
 }
 
 pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
+    // First, sort by start so grouping is stable.
     raw_g4s.sort_by(|a, b| a.start.cmp(&b.start));
+
+    // Remove exact-duplicate candidates produced from overlapping chunks.
+    // Use a simple key of start:end:sequence to deduplicate identical hits
+    // that can otherwise survive family consolidation due to minor coordinate
+    // differences or duplicate generation across stream chunks.
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped: Vec<G4> = Vec::with_capacity(raw_g4s.len());
+    for g in raw_g4s.into_iter() {
+        let key = format!("{}:{}:{}", g.start, g.end, g.sequence);
+        if seen.insert(key) {
+            deduped.push(g);
+        }
+    }
+
     let mut families: Vec<Vec<G4>> = Vec::new();
 
-    for g4 in raw_g4s.into_iter() {
+    for g4 in deduped.into_iter() {
         let mut inserted = false;
         for family in &mut families {
             if belongs_in(&g4, family) {
@@ -415,11 +464,47 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
         if family.is_empty() {
             continue;
         }
+        // If any family member is in our debug set or matches a start listed in
+        // `/tmp/stream_only_rows_after_fix.txt`, print family details. The latter
+        // lets us trace families by start positions without repeatedly editing
+        // source when debugging parity mismatches.
+        let targets = debug_targets();
+        let mut debug_starts = std::collections::HashSet::new();
+        if let Ok(contents) = std::fs::read_to_string("/tmp/stream_only_rows_after_fix.txt") {
+            for line in contents.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Some(first) = line.split(',').next() {
+                    if let Ok(n) = first.trim().parse::<usize>() {
+                        debug_starts.insert(n);
+                    }
+                }
+            }
+        }
+        let family_has_target = family
+            .iter()
+            .any(|m| targets.contains(m.sequence.as_str()) || debug_starts.contains(&m.start));
+        if family_has_target {
+            eprintln!("DEBUG FAMILY: size={} members:", family.len());
+            for m in &family {
+                eprintln!(
+                    "  MEMBER start={} end={} gscore={} seq={}",
+                    m.start, m.end, m.gscore, m.sequence
+                );
+            }
+        }
         let mut best = family[0].clone();
         for member in &family {
             if member.gscore > best.gscore {
                 best = member.clone();
             }
+        }
+        if family_has_target {
+            eprintln!(
+                "DEBUG FAMILY BEST: start={} end={} gscore={} seq={}",
+                best.start, best.end, best.gscore, best.sequence
+            );
         }
         results.push(best);
     }
@@ -468,6 +553,45 @@ pub fn find_owned_with_limits(
     find_owned_internal(sequence, min_tetrads, min_score, limits)
 }
 
+/// Like `find_owned_with_limits` but returns raw (un-consolidated) G4 candidates.
+pub fn find_raw_owned_with_limits(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    let chunk_size = chunk_size_for_limits(limits);
+    if sequence.len() > chunk_size {
+        return find_raw_owned_chunked(sequence, min_tetrads, min_score, limits, chunk_size);
+    }
+    find_raw_owned_internal(sequence, min_tetrads, min_score, limits)
+}
+
+pub fn find_owned_bytes_with_limits(
+    sequence: Arc<Vec<u8>>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    let chunk_size = chunk_size_for_limits(limits);
+    if sequence.len() > chunk_size {
+        // For simplicity reuse chunked path by converting chunk bytes into owned
+        // String-based path for chunking behavior. This avoids allocating the
+        // whole input earlier while still using existing chunked logic.
+        // Create a temporary String only if sequence is small enough for non-chunk path.
+        return find_owned_chunked(
+            unsafe { String::from_utf8_unchecked(sequence.to_vec()) },
+            min_tetrads,
+            min_score,
+            limits,
+            chunk_size,
+        );
+    }
+    // Non-chunked path: build SequenceData from bytes and call find_with_sequence.
+    let seq = Arc::new(SequenceData::from_bytes(sequence));
+    find_with_sequence(seq, min_tetrads, min_score, limits)
+}
+
 fn find_owned_internal(
     sequence: String,
     min_tetrads: usize,
@@ -476,6 +600,28 @@ fn find_owned_internal(
 ) -> Vec<G4> {
     let seq = Arc::new(SequenceData::from_owned(sequence));
     find_with_sequence(seq, min_tetrads, min_score, limits)
+}
+
+fn find_raw_owned_internal(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    let seq = Arc::new(SequenceData::from_owned(sequence));
+    find_raw_with_sequence(seq, min_tetrads, min_score, limits)
+}
+
+// Provide a parent-visible wrapper that guarantees no further chunking is
+// performed. This is used by the stream worker which already manages chunk
+// boundaries and must not re-chunk the provided window.
+pub(super) fn find_raw_owned_no_chunking(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    find_raw_owned_internal(sequence, min_tetrads, min_score, limits)
 }
 
 fn find_owned_chunked(
@@ -500,26 +646,63 @@ fn find_owned_chunked(
         chunks.push((start, primary_end, is_last, chunk));
         start = primary_end;
     }
-    let merged: Vec<G4> = chunks
+    // Merge all chunk hits (no cutoff filtering) and let consolidate_g4s do global de-duplication.
+    // For chunked owned inputs we want to collect raw candidates from each
+    // chunk (without per-chunk consolidation) and then perform a single
+    // global consolidate_g4s pass so that family/merge decisions are made
+    // with the full context.
+    let merged_raw: Vec<G4> = chunks
         .into_par_iter()
-        .flat_map_iter(|(offset, cutoff, is_last, chunk)| {
-            let hits = find_owned_internal(chunk, min_tetrads, min_score, limits);
-            hits.into_iter().filter_map(move |mut g4| {
+        .flat_map_iter(|(offset, _cutoff, _is_last, chunk)| {
+            let hits = find_raw_owned_internal(chunk, min_tetrads, min_score, limits);
+            hits.into_iter().map(move |mut g4| {
                 shift_g4(&mut g4, offset);
-                if !is_last && g4.start >= cutoff {
-                    return None;
+                // debug raw hits
+                let targets = debug_targets();
+                if targets.contains(g4.sequence.as_str()) {
+                    eprintln!(
+                        "DEBUG RAW_G4 (chunk offset={}): start={} end={} gscore={} seq={}",
+                        offset, g4.start, g4.end, g4.gscore, g4.sequence
+                    );
                 }
-                Some(g4)
+                g4
             })
         })
         .collect();
-    consolidate_g4s(merged)
+    consolidate_g4s(merged_raw)
+}
+
+fn find_raw_owned_chunked(
+    sequence: String,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    chunk_size: usize,
+) -> Vec<G4> {
+    let len = sequence.len();
+    if len <= chunk_size {
+        return find_raw_owned_internal(sequence, min_tetrads, min_score, limits);
+    }
+    let overlap = compute_chunk_overlap(min_tetrads, limits);
+    let mut start = 0usize;
+    let mut out = Vec::new();
+    while start < len {
+        let primary_end = (start + chunk_size).min(len);
+        let window_end = (primary_end + overlap).min(len);
+        let chunk = sequence[start..window_end].to_string();
+        let is_last = primary_end == len;
+        let hits = find_raw_owned_internal(chunk, min_tetrads, min_score, limits);
+        for mut g4 in hits {
+            shift_g4(&mut g4, start);
+            out.push(g4);
+        }
+        start = primary_end;
+    }
+    out
 }
 
 pub(crate) fn chunk_size_for_limits(limits: ScanLimits) -> usize {
-    let desired = limits
-        .max_g4_length
-        .saturating_add(WINDOW_PADDING_BP);
+    let desired = limits.max_g4_length.saturating_add(WINDOW_PADDING_BP);
     desired.clamp(WINDOW_MIN_BP, WINDOW_MAX_BP)
 }
 
@@ -547,14 +730,32 @@ fn find_with_sequence(
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
+    let raw = find_raw_with_sequence(seq, min_tetrads, min_score, limits);
+    consolidate_g4s(raw)
+}
+
+fn find_raw_with_sequence(
+    seq: Arc<SequenceData>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
     let mut cands = VecDeque::new();
     seed_queue(&mut cands, seq.clone(), min_tetrads, limits);
     let mut raw_g4s = Vec::new();
-
     while let Some(cand) = cands.pop_front() {
         if cand.complete() {
             if cand.viable(min_score) {
-                raw_g4s.push(G4::from_candidate(&cand));
+                let g4 = G4::from_candidate(&cand);
+                // conditional debug: only print for our targets
+                let targets = debug_targets();
+                if targets.contains(g4.sequence.as_str()) {
+                    println!(
+                        "DEBUG RAW_G4: start={} end={} gscore={} seq={}",
+                        g4.start, g4.end, g4.gscore, g4.sequence
+                    );
+                }
+                raw_g4s.push(g4);
             }
         } else {
             for expanded in cand.expand() {
@@ -562,8 +763,7 @@ fn find_with_sequence(
             }
         }
     }
-
-    consolidate_g4s(raw_g4s)
+    raw_g4s
 }
 
 pub fn find_csv(sequence: &str, min_tetrads: usize, min_score: i32) -> String {
@@ -672,7 +872,13 @@ pub fn write_parquet<W: Write + Send + 'static>(
     min_score: i32,
     writer: W,
 ) -> Result<(), ExportError> {
-    write_parquet_with_limits(sequence, min_tetrads, min_score, ScanLimits::default(), writer)
+    write_parquet_with_limits(
+        sequence,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        writer,
+    )
 }
 
 pub fn write_parquet_with_limits<W: Write + Send + 'static>(
@@ -692,7 +898,13 @@ pub fn write_parquet_owned<W: Write + Send + 'static>(
     min_score: i32,
     writer: W,
 ) -> Result<(), ExportError> {
-    write_parquet_owned_with_limits(sequence, min_tetrads, min_score, ScanLimits::default(), writer)
+    write_parquet_owned_with_limits(
+        sequence,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        writer,
+    )
 }
 
 pub fn write_parquet_owned_with_limits<W: Write + Send + 'static>(
@@ -851,13 +1063,13 @@ fn finalize_sequence(
     sequence: &mut String,
     sequences: &mut Vec<ChromSequence>,
 ) {
-    if let Some(name) = current_name.take() {
-        if !sequence.is_empty() {
-            sequences.push(ChromSequence {
-                name,
-                sequence: std::mem::take(sequence),
-            });
-        }
+    if let Some(name) = current_name.take()
+        && !sequence.is_empty()
+    {
+        sequences.push(ChromSequence {
+            name,
+            sequence: std::mem::take(sequence),
+        });
     }
 }
 

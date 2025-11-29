@@ -1,2 +1,6 @@
 /target
-.vscode
+/output
+.DS_Store
+/orignal
+dme.fa
+big.txt

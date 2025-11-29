@@ -4,10 +4,18 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use qgrs_rust::{InputMode, ScanLimits, DEFAULT_MAX_G4_LENGTH, DEFAULT_MAX_G_RUN, qgrs};
+use num_cpus;
+use qgrs_rust::{DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ScanLimits, qgrs};
+use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
 fn main() {
+    // Initialize Rayon global thread pool to match machine CPU count.
+    // This makes parallelism deterministic across runs and avoids relying on
+    // the environment variable `RAYON_NUM_THREADS`.
+    let threads = num_cpus::get();
+    let _ = ThreadPoolBuilder::new().num_threads(threads).build_global();
+
     if let Err(err) = run_env(env::args().skip(1)) {
         eprintln!("Error: {err}");
         std::process::exit(1);
@@ -131,9 +139,7 @@ where
         return Err(usage("--max-g-run must be ≥ --min-tetrads"));
     }
     if max_g4_length < min_required_length {
-        return Err(usage(
-            "--max-g4-length must be ≥ 4 * --min-tetrads",
-        ));
+        return Err(usage("--max-g4-length must be ≥ 4 * --min-tetrads"));
     }
 
     let limits = ScanLimits::new(max_g4_length, max_g_run);
@@ -143,14 +149,7 @@ where
             if output_dir.is_some() {
                 return Err(usage("--output-dir can only be used with --file"));
             }
-            process_inline_sequence(
-                seq,
-                format,
-                output_path,
-                min_tetrads,
-                min_score,
-                limits,
-            )?;
+            process_inline_sequence(seq, format, output_path, min_tetrads, min_score, limits)?;
         }
         InputSpec::File(path) => {
             if output_path.is_some() {
@@ -221,8 +220,7 @@ fn process_inline_sequence(
 ) -> Result<(), String> {
     match format {
         OutputFormat::Csv => {
-            let csv =
-                qgrs::find_csv_owned_with_limits(sequence, min_tetrads, min_score, limits);
+            let csv = qgrs::find_csv_owned_with_limits(sequence, min_tetrads, min_score, limits);
             if let Some(path) = output_path {
                 fs::write(&path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?
             } else {
@@ -265,9 +263,8 @@ fn process_fasta_file(
                 let filename = next_output_filename(&chrom.name, format, &mut name_counts);
                 chrom_outputs.push((chrom, dir.join(filename)));
             }
-            chrom_outputs
-                .into_par_iter()
-                .try_for_each(|(chrom, filepath)| -> Result<(), String> {
+            chrom_outputs.into_par_iter().try_for_each(
+                |(chrom, filepath)| -> Result<(), String> {
                     let qgrs::ChromSequence { name, sequence } = chrom;
                     match format {
                         OutputFormat::Csv => {
@@ -290,11 +287,12 @@ fn process_fasta_file(
                                 limits,
                                 file,
                             )
-                                .map_err(|err| format!("failed to write parquet for {}: {err}", name))?
+                            .map_err(|err| format!("failed to write parquet for {}: {err}", name))?
                         }
                     }
                     Ok(())
-                })?;
+                },
+            )?;
         }
         InputMode::Stream => {
             let mut processed = 0usize;
@@ -304,21 +302,21 @@ fn process_fasta_file(
                 min_score,
                 limits,
                 |name, results| {
-                processed += 1;
-                let filename = next_output_filename(&name, format, &mut name_counts);
-                let filepath = dir.join(&filename);
-                match format {
-                    OutputFormat::Csv => {
-                        let csv = qgrs::render_csv_results(&results);
-                        fs::write(&filepath, csv)?;
+                    processed += 1;
+                    let filename = next_output_filename(&name, format, &mut name_counts);
+                    let filepath = dir.join(&filename);
+                    match format {
+                        OutputFormat::Csv => {
+                            let csv = qgrs::render_csv_results(&results);
+                            fs::write(&filepath, csv)?;
+                        }
+                        OutputFormat::Parquet => {
+                            let file = fs::File::create(&filepath)?;
+                            qgrs::write_parquet_results(&results, file)
+                                .map_err(|err| io::Error::other(err.to_string()))?;
+                        }
                     }
-                    OutputFormat::Parquet => {
-                        let file = fs::File::create(&filepath)?;
-                        qgrs::write_parquet_results(&results, file)
-                            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-                    }
-                }
-                Ok(())
+                    Ok(())
                 },
             )
             .map_err(|err| format!("failed to process {path:?}: {err}"))?;
@@ -368,6 +366,27 @@ enum OutputFormat {
     Parquet,
 }
 
+impl TryFrom<String> for OutputFormat {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "csv" => Ok(OutputFormat::Csv),
+            "parquet" => Ok(OutputFormat::Parquet),
+            _ => Err(usage("--format must be either 'csv' or 'parquet'")),
+        }
+    }
+}
+
+impl OutputFormat {
+    fn extension(&self) -> &'static str {
+        match self {
+            OutputFormat::Csv => "csv",
+            OutputFormat::Parquet => "parquet",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,7 +413,7 @@ mod tests {
             "2",
         ]);
         assert!(err.is_err());
-        let msg = format!("{}", err.unwrap_err());
+        let msg = err.unwrap_err().to_string();
         assert!(msg.contains("max-g4-length"));
     }
 
@@ -404,26 +423,5 @@ mod tests {
         let original = env::args_os().collect::<Vec<_>>();
         let _ = original;
         run_env(argv.into_iter().skip(1))
-    }
-}
-
-impl TryFrom<String> for OutputFormat {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.as_str() {
-            "csv" => Ok(OutputFormat::Csv),
-            "parquet" => Ok(OutputFormat::Parquet),
-            _ => Err(usage("--format must be either 'csv' or 'parquet'")),
-        }
-    }
-}
-
-impl OutputFormat {
-    fn extension(&self) -> &'static str {
-        match self {
-            OutputFormat::Csv => "csv",
-            OutputFormat::Parquet => "parquet",
-        }
     }
 }

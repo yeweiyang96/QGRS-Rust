@@ -13,3 +13,4 @@ memchr = "2.7"
 arrow-array = "53.1.0"
 arrow-schema = "53.1.0"
 parquet = { version = "53.1.0", features = ["arrow"] }
+num_cpus = "1.17"
