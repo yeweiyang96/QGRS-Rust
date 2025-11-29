@@ -12,7 +12,7 @@ use memmap2::MmapOptions;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::errors::ParquetError;
 use rayon::prelude::*;
-use std::collections::HashSet;
+// debug helpers removed for cleanup
 
 pub mod stream;
 
@@ -61,27 +61,7 @@ const WINDOW_PADDING_BP: usize = 8;
 const OVERLAP_MARGIN_BP: usize = 128;
 
 // Debug targets: sequences (lowercase) or start positions we want to trace.
-fn debug_targets() -> HashSet<&'static str> {
-    let mut s = HashSet::new();
-    s.insert("gggtggtgctgggcctttgtgg");
-    s.insert("ggcgggcaatggcatgg");
-    s.insert("ggaagatgtggccggaggtagcaagg");
-    s.insert("ggctacactcggactttgggattcgg");
-    s.insert("gggaccgagtacgggaccgagtacgggaccagtacggg");
-    // Added stream-only sequences for targeted debugging
-    s.insert("gggggggggg");
-    s.insert("ggagggggaaaccgaagggcgg");
-    // also include the longer variant seen in stream output
-    s.insert("ggagggggaaaccgaagggcggcagg");
-    s.insert("ggactgggactgcaggggtctagctgg");
-    s.insert("ggagatgggagtgcctggtggcaccaaagg");
-    s.insert("ggaagggcattatggggcacaagg");
-    s.insert("ggagtgggttgaccgagggcggg");
-    // include duplicated short homopolymers seen in stream-only rows
-    s.insert("gggggggggg");
-    s.insert("gggggggggg");
-    s
-}
+// debug helpers removed
 
 #[derive(Clone, Debug)]
 struct SequenceData {
@@ -464,48 +444,14 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
         if family.is_empty() {
             continue;
         }
-        // If any family member is in our debug set or matches a start listed in
-        // `/tmp/stream_only_rows_after_fix.txt`, print family details. The latter
-        // lets us trace families by start positions without repeatedly editing
-        // source when debugging parity mismatches.
-        let targets = debug_targets();
-        let mut debug_starts = std::collections::HashSet::new();
-        if let Ok(contents) = std::fs::read_to_string("/tmp/stream_only_rows_after_fix.txt") {
-            for line in contents.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Some(first) = line.split(',').next() {
-                    if let Ok(n) = first.trim().parse::<usize>() {
-                        debug_starts.insert(n);
-                    }
-                }
-            }
-        }
-        let family_has_target = family
-            .iter()
-            .any(|m| targets.contains(m.sequence.as_str()) || debug_starts.contains(&m.start));
-        if family_has_target {
-            eprintln!("DEBUG FAMILY: size={} members:", family.len());
-            for m in &family {
-                eprintln!(
-                    "  MEMBER start={} end={} gscore={} seq={}",
-                    m.start, m.end, m.gscore, m.sequence
-                );
-            }
-        }
+        // Normal family consolidation: choose best by gscore
         let mut best = family[0].clone();
         for member in &family {
             if member.gscore > best.gscore {
                 best = member.clone();
             }
         }
-        if family_has_target {
-            eprintln!(
-                "DEBUG FAMILY BEST: start={} end={} gscore={} seq={}",
-                best.start, best.end, best.gscore, best.sequence
-            );
-        }
+        // end per-family debug removed
         results.push(best);
     }
 
@@ -657,14 +603,6 @@ fn find_owned_chunked(
             let hits = find_raw_owned_internal(chunk, min_tetrads, min_score, limits);
             hits.into_iter().map(move |mut g4| {
                 shift_g4(&mut g4, offset);
-                // debug raw hits
-                let targets = debug_targets();
-                if targets.contains(g4.sequence.as_str()) {
-                    eprintln!(
-                        "DEBUG RAW_G4 (chunk offset={}): start={} end={} gscore={} seq={}",
-                        offset, g4.start, g4.end, g4.gscore, g4.sequence
-                    );
-                }
                 g4
             })
         })
@@ -747,14 +685,6 @@ fn find_raw_with_sequence(
         if cand.complete() {
             if cand.viable(min_score) {
                 let g4 = G4::from_candidate(&cand);
-                // conditional debug: only print for our targets
-                let targets = debug_targets();
-                if targets.contains(g4.sequence.as_str()) {
-                    println!(
-                        "DEBUG RAW_G4: start={} end={} gscore={} seq={}",
-                        g4.start, g4.end, g4.gscore, g4.sequence
-                    );
-                }
                 raw_g4s.push(g4);
             }
         } else {

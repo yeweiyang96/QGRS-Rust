@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
@@ -11,15 +11,7 @@ use super::{
     find_raw_owned_no_chunking, find_raw_owned_with_limits, parse_chrom_name, shift_g4,
 };
 
-fn debug_targets() -> Vec<&'static str> {
-    vec![
-        "gggtggtgctgggcctttgtgg",
-        "ggcgggcaatggcatgg",
-        "ggaagatgtggccggaggtagcaagg",
-        "ggctacactcggactttgggattcgg",
-        "gggaccgagtacgggaccgagtacgggaccagtacggg",
-    ]
-}
+// debug helpers removed
 
 pub fn process_fasta_stream<F>(
     path: &Path,
@@ -236,26 +228,7 @@ impl StreamChunkScheduler {
         let tx = self.tx.clone();
         self.inflight += 1;
         spawn(move || {
-            // If this chunk contains any of the debug targets, emit a small
-            // per-chunk diagnostic including offset and a short ASCII snippet.
-            let targets = debug_targets();
-            let mut chunk_contains_target = false;
-            for t in &targets {
-                let tb = t.as_bytes();
-                if tb.len() <= chunk.len() && chunk.windows(tb.len()).any(|w| w == tb) {
-                    chunk_contains_target = true;
-                    break;
-                }
-            }
-            if chunk_contains_target {
-                let snippet = String::from_utf8_lossy(&chunk[..chunk.len().min(120)]);
-                eprintln!(
-                    "DEBUG STREAM_CHUNK (offset={}, len={}): contains target; snippet=\"{}\"",
-                    offset,
-                    chunk.len(),
-                    snippet
-                );
-            }
+            // per-chunk diagnostic removed
 
             // Convert the collected bytes to a String without per-byte char mapping.
             // Genomic input is ASCII, so `from_utf8_unchecked` is safe and avoids
@@ -267,18 +240,7 @@ impl StreamChunkScheduler {
             for g4 in &mut hits {
                 shift_g4(g4, offset);
             }
-            // temporarily disable worker-local exact deduplication: send raw hits
-            // to the global consolidator so it can perform family merging.
-            for g4 in &hits {
-                // debug: print hits matching target sequences
-                let targets = debug_targets();
-                if targets.contains(&g4.sequence.as_str()) {
-                    eprintln!(
-                        "DEBUG STREAM_HIT (offset={}): start={} end={} gscore={} seq={}",
-                        offset, g4.start, g4.end, g4.gscore, g4.sequence
-                    );
-                }
-            }
+            // worker-local dedup is disabled; send raw hits to consolidator
             let _ = tx.send(hits);
         });
     }
