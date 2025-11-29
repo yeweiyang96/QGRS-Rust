@@ -645,12 +645,10 @@ pub(crate) fn chunk_size_for_limits(limits: ScanLimits) -> usize {
 }
 
 pub(crate) fn compute_chunk_overlap(min_tetrads: usize, limits: ScanLimits) -> usize {
-    let required = maximum_length(min_tetrads.max(4), limits);
-    let chunk = chunk_size_for_limits(limits);
-    let extra = required
-        .saturating_sub(chunk)
-        .saturating_add(OVERLAP_MARGIN_BP);
-    extra.max(chunk)
+    // Use padding equal to max_g4_length so overlap = max_g4_length + padding
+    // becomes 2 * max_g4_length. This ensures a worker window contains two
+    // full max-length G4 candidates across a primary chunk boundary.
+    limits.max_g4_length.saturating_mul(2)
 }
 
 pub(crate) fn shift_g4(g4: &mut G4, offset: usize) {
