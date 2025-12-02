@@ -30,7 +30,7 @@ pub struct ChromSequence {
 }
 
 impl ChromSequence {
-    pub fn to_string(&self) -> String {
+    pub fn as_uppercase_string(&self) -> String {
         let mut seq = unsafe { String::from_utf8_unchecked(self.sequence.as_ref().clone()) };
         seq.make_ascii_uppercase();
         seq
@@ -489,7 +489,7 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
 
     // Remove exact-duplicate candidates produced from overlapping chunks，
     // 同一 key (start/end/序列) 只保留最高 gscore 的成员，避免早期插入
-    // 的低分候选把高分版本“顶掉”。
+    // 的低分候选把高分版本顶掉。
     use std::collections::HashMap;
     use std::collections::hash_map::Entry;
     let mut best_by_key: HashMap<DedupKey, G4> = HashMap::new();
@@ -664,8 +664,7 @@ fn find_raw_owned_internal(
     limits: ScanLimits,
 ) -> Vec<G4> {
     let seq = Arc::new(SequenceData::from_owned(sequence));
-    let raw = find_raw_with_sequence(seq, min_tetrads, min_score, limits);
-    raw
+    find_raw_with_sequence(seq, min_tetrads, min_score, limits)
 }
 
 // Provide a parent-visible wrapper that guarantees no further chunking is
@@ -1192,7 +1191,9 @@ mod tests {
     use super::*;
     use std::{collections::HashMap, env, fs, sync::Arc};
 
-    fn g4_signatures(g4s: &[G4]) -> Vec<(usize, usize, usize, usize, i32, i32, i32, i32, String)> {
+    type G4Signature = (usize, usize, usize, usize, i32, i32, i32, i32, String);
+
+    fn g4_signatures(g4s: &[G4]) -> Vec<G4Signature> {
         let mut sigs: Vec<_> = g4s
             .iter()
             .map(|g| {
@@ -1259,9 +1260,9 @@ mod tests {
         let seqs = load_sequences_from_path(&path, InputMode::Stream).unwrap();
         assert_eq!(seqs.len(), 2);
         assert_eq!(seqs[0].name, "chr1");
-        assert_eq!(seqs[0].to_string(), "GGGGAC");
+        assert_eq!(seqs[0].as_uppercase_string(), "GGGGAC");
         assert_eq!(seqs[1].name, "chr2");
-        assert_eq!(seqs[1].to_string(), "TTTT");
+        assert_eq!(seqs[1].as_uppercase_string(), "TTTT");
         fs::remove_file(&path).unwrap();
     }
 
@@ -1272,9 +1273,9 @@ mod tests {
         let seqs = load_sequences_from_path(&path, InputMode::Mmap).unwrap();
         assert_eq!(seqs.len(), 2);
         assert_eq!(seqs[0].name, "chr1");
-        assert_eq!(seqs[0].to_string(), "GGGGAC");
+        assert_eq!(seqs[0].as_uppercase_string(), "GGGGAC");
         assert_eq!(seqs[1].name, "chrX");
-        assert_eq!(seqs[1].to_string(), "CCCC");
+        assert_eq!(seqs[1].as_uppercase_string(), "CCCC");
         fs::remove_file(&path).unwrap();
     }
 
@@ -1286,7 +1287,7 @@ mod tests {
         let sequences = load_sequences_from_path(&path, InputMode::Stream).unwrap();
         let mut expected: HashMap<String, Vec<G4>> = HashMap::new();
         for chrom in &sequences {
-            let hits = find_owned(chrom.to_string(), 2, 17);
+            let hits = find_owned(chrom.as_uppercase_string(), 2, 17);
             expected.insert(chrom.name.clone(), hits);
         }
         let mut actual: HashMap<String, Vec<G4>> = HashMap::new();
