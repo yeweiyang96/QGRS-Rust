@@ -6,6 +6,18 @@ edition = "2024"
 [lib]
 name = "qgrs_rust"
 
+[[bin]]
+name = "qgrs"
+path = "src/bin/qgrs.rs"
+
+[[bin]]
+name = "compare_modes"
+path = "src/bin/compare_modes.rs"
+
+[[bin]]
+name = "compare_csv_outputs"
+path = "src/bin/compare_csv_outputs.rs"
+
 [dependencies]
 memmap2 = "0.9.9"
 rayon = "1.11"
@@ -14,3 +26,9 @@ arrow-array = "53.1.0"
 arrow-schema = "53.1.0"
 parquet = { version = "53.1.0", features = ["arrow"] }
 num_cpus = "1.17"
+clap = { version = "4.2", features = ["derive"] }
+needletail = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+csv = "1.2"
+anyhow = "1.0"

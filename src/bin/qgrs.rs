@@ -4,7 +4,6 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use num_cpus;
 use qgrs_rust::{DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ScanLimits, qgrs};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -266,28 +265,24 @@ fn process_fasta_file(
             chrom_outputs.into_par_iter().try_for_each(
                 |(chrom, filepath)| -> Result<(), String> {
                     let qgrs::ChromSequence { name, sequence } = chrom;
+                    let results = qgrs::find_owned_bytes_with_limits(
+                        sequence,
+                        min_tetrads,
+                        min_score,
+                        limits,
+                    );
                     match format {
                         OutputFormat::Csv => {
-                            let csv = qgrs::find_csv_owned_with_limits(
-                                sequence,
-                                min_tetrads,
-                                min_score,
-                                limits,
-                            );
+                            let csv = qgrs::render_csv_results(&results);
                             fs::write(&filepath, csv)
                                 .map_err(|err| format!("failed to write {filepath:?}: {err}"))?
                         }
                         OutputFormat::Parquet => {
                             let file = fs::File::create(&filepath)
                                 .map_err(|err| format!("failed to create {filepath:?}: {err}"))?;
-                            qgrs::write_parquet_owned_with_limits(
-                                sequence,
-                                min_tetrads,
-                                min_score,
-                                limits,
-                                file,
-                            )
-                            .map_err(|err| format!("failed to write parquet for {}: {err}", name))?
+                            qgrs::write_parquet_results(&results, file).map_err(|err| {
+                                format!("failed to write parquet for {}: {err}", name)
+                            })?
                         }
                     }
                     Ok(())

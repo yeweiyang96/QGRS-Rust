@@ -163,3 +163,36 @@ time target/release/qgrs --file aaa.fa --mode stream --max-g4-length 45 --max-g-
 ```
 
 Track `real` time, CPU%, and RSS with your preferred profiler to decide whether `mmap` or `stream` is better for your environment. Always benchmark with `--release` builds to enable full optimizations.
+
+### compare_modes consistency tester
+
+`target/release/compare_modes` (defined in `src/bin/compare_modes.rs`) benchmarks and cross-checks the two ingestion pipelines against the same FASTA input. It scans every chromosome once with the mmap batch loader and once with the streaming reader, reports per-mode timings and hit counts, then diff-checks every field (`start`, `end`, `length`, loops, tetrads, gscore, sequence) to ensure both paths stay bit-for-bit aligned. The process exits with code `0` on success and `1` with detailed mismatch logs when discrepancies are detected.
+
+**Before you run it**
+
+- Build the binary at least once so that `target/release/compare_modes` exists (typically from a prior release build).
+- Provide a readable FASTA file containing one or more chromosomes; the tool operates read-only and prints summaries to stdout.
+
+**CLI arguments**
+
+| Positional argument | Description                         | Default |
+| ------------------- | ----------------------------------- | ------- |
+| `<fasta>`           | Path to the FASTA file to compare.  | _none_  |
+| `[min_tetrads]`     | Minimum tetrads threshold per scan. | `2`     |
+| `[min_gscore]`      | Minimum g-score threshold per scan. | `17`    |
+
+**Example commands** (using the compiled release binary; adjust the path if you install it elsewhere):
+
+```bash
+# Compare dme.fa with default thresholds
+target/release/compare_modes dme.fa
+
+# Tighten heuristics to 3 tetrads / gscore 20
+target/release/compare_modes dme.fa 3 20
+
+# Point at a chromosome subset file
+target/release/compare_modes output/chromosome-2L.fa 4 30
+```
+
+During a run you will see individual sections for the mmap phase, the stream phase, a speed comparison, and the final consistency verdict. An error summary (up to 10 detailed mismatches) is printed before the program returns a non-zero exit status, which makes the tool suitable for automated regression checks.
+

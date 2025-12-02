@@ -8,7 +8,7 @@ use rayon::spawn;
 
 use super::{
     G4, ScanLimits, chunk_size_for_limits, compute_chunk_overlap, consolidate_g4s,
-    find_raw_owned_no_chunking, find_raw_owned_with_limits, parse_chrom_name, shift_g4,
+    find_raw_owned_no_chunking, parse_chrom_name, shift_g4,
 };
 
 // debug helpers removed
