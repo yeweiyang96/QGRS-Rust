@@ -493,6 +493,7 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
     use std::collections::HashMap;
     use std::collections::hash_map::Entry;
     let mut best_by_key: HashMap<DedupKey, G4> = HashMap::new();
+    // 消费 raw_g4s，转移所有权（避免克隆大量数据）
     for g in raw_g4s.into_iter() {
         let key = DedupKey::new(&g);
         match best_by_key.entry(key) {
@@ -507,6 +508,9 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
         }
     }
     let mut deduped: Vec<G4> = best_by_key.into_values().collect();
+    // HashMap 的迭代顺序是不确定的（取决于哈希值和内部扩容）
+    // 后续家族分组（belongs_in）是顺序敏感的：候选遇到第一个重叠家族就加入并停止
+    // 不同顺序会导致同一批候选被分到不同的家族
     deduped.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
 
     let mut families: Vec<Vec<G4>> = Vec::new();
@@ -836,7 +840,9 @@ fn find_with_sequence(
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
+    // Find raw candidates first
     let raw = find_raw_with_sequence(seq, min_tetrads, min_score, limits);
+    // Then consolidate families
     consolidate_g4s(raw)
 }
 
