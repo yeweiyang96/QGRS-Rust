@@ -4,7 +4,7 @@
  
 ![Rust 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust&logoColor=white)
 ![Platforms macOS/Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey?logo=apple&logoColor=white)
-![Outputs CSV / Parquet](https://img.shields.io/badge/output-CSV%20%7C%20Parquet-0e83cd)
+![Outputs CSV / Parquet / bedGraph](https://img.shields.io/badge/output-CSV%20%7C%20Parquet%20%7C%20bedGraph-0e83cd)
 ![Mode mmap / stream](https://img.shields.io/badge/mode-mmap%20%7C%20stream-6f42c1)
 
 </div>
@@ -28,6 +28,7 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 - Rust scanner mirrors the legacy scoring heuristics while benefiting from zero-copy iterators and Rayon parallelism.
 - Memory-mapped (`mmap`) and streaming (`stream`) readers let you pick the best strategy per dataset.
 - CSV/Parquet exporters always report 1-based, inclusive coordinates for genome-browser compatibility.
+- Optional per-family bedGraph sidecars capture overlapping hit density alongside CSV/Parquet exports.
 - CLI validation enforces sane tetrad, loop, and window settings to avoid silent misconfiguration.
 
 ## 🧰 Requirements
@@ -72,6 +73,9 @@ Options:
    --output <PATH>        Destination file when using --sequence (required for parquet)
    --output-dir <DIR>     Directory for per-chromosome exports when using --file
    --mode <mmap|stream>   Input mode when using --file (default mmap)
+   --bedgraph[=<NAME>]    Emit a .bedgraph file per sequence (NAME overrides inline chromosome label)
+   --bedgraph-label <NAME>
+                          Alias for --bedgraph=<NAME> when naming inline sequences
    --help                 Show this message
 ```
 
@@ -125,6 +129,7 @@ target/release/qgrs \
 | `--format <csv\|parquet>` | Output encoding. CSV defaults to stdout for inline sequences; Parquet requires a file/dir. | `csv`                    |
 | `--output <FILE\|- >`     | Single output file (or `-` for stdout) when scanning inline sequences.                     | stdout for CSV           |
 | `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
+| `--bedgraph[=<NAME>]`     | Emit a `.bedgraph` sidecar next to each CSV/Parquet output; optional `NAME` overrides the inline chromosome name used in the track. | disabled |
 
 The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet.
 
@@ -143,6 +148,17 @@ Both exporters emit the same fields (see `render_csv` and `write_parquet_from_re
 | `sequence`       | Exact G4 motif sequence extracted from the input.                                       |
 
 CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences).
+
+When `--bedgraph` is enabled an additional `.bedgraph` file is written next to every CSV/Parquet artifact. Each row represents a consolidated family (all overlapping G4s) and follows the schema:
+
+| Column    | Meaning                                                    |
+| --------- | ---------------------------------------------------------- |
+| `chrom`   | Chromosome/sequence label (inline label or FASTA header).  |
+| `start`   | 0-based inclusive start of the family span.                |
+| `end`     | 0-based exclusive end of the family span.                  |
+| `count`   | Number of raw G4s in the family.                           |
+| `mean`    | Mean G-score across the family members.                    |
+| `density` | `count / span_length * 100`, a coarse per-base density (%). |
 
 ## Testing & QA
 

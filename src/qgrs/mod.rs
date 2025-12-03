@@ -459,6 +459,45 @@ impl Clone for G4 {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct G4Family {
+    pub members: Vec<G4>,
+}
+
+impl G4Family {
+    pub fn start_one_based(&self) -> usize {
+        self.members.iter().map(|g| g.start).min().unwrap_or(0)
+    }
+
+    pub fn zero_based_start(&self) -> usize {
+        self.start_one_based().saturating_sub(1)
+    }
+
+    pub fn zero_based_end(&self) -> usize {
+        self.members
+            .iter()
+            .map(|g| g.start.saturating_sub(1) + g.length)
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn span_length(&self) -> usize {
+        self.zero_based_end()
+            .saturating_sub(self.zero_based_start())
+    }
+
+    pub fn count(&self) -> usize {
+        self.members.len()
+    }
+}
+
+#[derive(Debug)]
+pub struct SearchResults {
+    pub chrom_name: String,
+    pub g4s: Vec<G4>,
+    pub families: Option<Vec<G4Family>>,
+}
+
 pub(super) fn maximum_length(num_tetrads: usize, limits: ScanLimits) -> usize {
     let base = if num_tetrads < 3 { 30 } else { 45 };
     base.min(limits.max_g4_length)
@@ -475,21 +514,37 @@ fn overlapped(a: &G4, b: &G4) -> bool {
         || (b_end >= a_start && b_end <= a_end)
 }
 
-fn belongs_in(g4: &G4, family: &[G4]) -> bool {
-    family.iter().any(|member| overlapped(g4, member))
+fn belongs_in(g4: &G4, family: &G4Family) -> bool {
+    family.members.iter().any(|member| overlapped(g4, member))
 }
 
-pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
-    // First, sort by start so grouping is stable.
-    raw_g4s.sort_by(|a, b| a.start.cmp(&b.start));
+pub(super) fn consolidate_g4s(raw_g4s: Vec<G4>) -> Vec<G4> {
+    let (winners, _) = consolidate_g4s_with_families(raw_g4s);
+    winners
+}
 
-    // Remove exact-duplicate candidates produced from overlapping chunks，
-    // 同一 key (start/end/序列) 只保留最高 gscore 的成员，避免早期插入
-    // 的低分候选把高分版本顶掉。
+fn consolidate_g4s_with_families(raw_g4s: Vec<G4>) -> (Vec<G4>, Vec<G4Family>) {
+    let deduped = dedup_g4_candidates(raw_g4s);
+    let families = build_g4_families(deduped);
+    let mut winners = Vec::with_capacity(families.len());
+    for family in &families {
+        if let Some(best) = family
+            .members
+            .iter()
+            .max_by_key(|member| member.gscore)
+            .cloned()
+        {
+            winners.push(best);
+        }
+    }
+    (winners, families)
+}
+
+fn dedup_g4_candidates(mut raw_g4s: Vec<G4>) -> Vec<G4> {
+    raw_g4s.sort_by(|a, b| a.start.cmp(&b.start));
     use std::collections::HashMap;
     use std::collections::hash_map::Entry;
     let mut best_by_key: HashMap<DedupKey, G4> = HashMap::new();
-    // 消费 raw_g4s，转移所有权（避免克隆大量数据）
     for g in raw_g4s.into_iter() {
         let key = DedupKey::new(&g);
         match best_by_key.entry(key) {
@@ -504,56 +559,66 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
         }
     }
     let mut deduped: Vec<G4> = best_by_key.into_values().collect();
-    // HashMap 的迭代顺序是不确定的（取决于哈希值和内部扩容）
-    // 后续家族分组（belongs_in）是顺序敏感的：候选遇到第一个重叠家族就加入并停止
-    // 不同顺序会导致同一批候选被分到不同的家族
     deduped.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+    deduped
+}
 
-    let mut families: Vec<Vec<G4>> = Vec::new();
-
-    for g4 in deduped.into_iter() {
+fn build_g4_families(mut deduped: Vec<G4>) -> Vec<G4Family> {
+    let mut families: Vec<G4Family> = Vec::new();
+    for g4 in deduped.drain(..) {
         let mut inserted = false;
         for family in &mut families {
             if belongs_in(&g4, family) {
-                family.push(g4.clone());
+                family.members.push(g4.clone());
                 inserted = true;
                 break;
             }
         }
         if !inserted {
-            families.push(vec![g4]);
+            families.push(G4Family { members: vec![g4] });
         }
     }
+    families
+}
 
-    let mut results = Vec::new();
-    for family in families.into_iter() {
-        if family.is_empty() {
-            continue;
-        }
-        // Normal family consolidation: choose best by gscore
-        let mut best = family[0].clone();
-        for member in &family {
-            if member.gscore > best.gscore {
-                best = member.clone();
-            }
-        }
-        // end per-family debug removed
-        results.push(best);
+pub(super) fn finalize_search_results(
+    raw_g4s: Vec<G4>,
+    chrom_name: &str,
+    collect_families: bool,
+) -> SearchResults {
+    let (g4s, families) = if collect_families {
+        let (hits, fams) = consolidate_g4s_with_families(raw_g4s);
+        (hits, Some(fams))
+    } else {
+        (consolidate_g4s(raw_g4s), None)
+    };
+    SearchResults {
+        chrom_name: chrom_name.to_string(),
+        g4s,
+        families,
     }
-
-    results
 }
 
 pub fn find_owned_bytes(sequence: Arc<Vec<u8>>, min_tetrads: usize, min_score: i32) -> Vec<G4> {
-    find_owned_bytes_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
+    find_owned_bytes_with_limits(
+        sequence,
+        "chromosome_1",
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        false,
+    )
+    .g4s
 }
 
 pub fn find_owned_bytes_with_limits(
     sequence: Arc<Vec<u8>>,
+    chrom_name: &str,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
-) -> Vec<G4> {
+    collect_families: bool,
+) -> SearchResults {
     let chunk_size = chunk_size_for_limits(limits);
     if sequence.len() > chunk_size {
         // 零拷贝窗口策略：窗口仅决定种子扫描范围，候选扩展沿用
@@ -589,11 +654,12 @@ pub fn find_owned_bytes_with_limits(
                 hits.into_iter()
             })
             .collect();
-        return consolidate_g4s(merged_raw);
+        return finalize_search_results(merged_raw, chrom_name, collect_families);
     }
     // Non-chunked path: build SequenceData from bytes and call find_with_sequence.
     let seq = Arc::new(SequenceData::from_bytes(sequence));
-    find_with_sequence(seq, min_tetrads, min_score, limits)
+    let raw = find_raw_with_sequence(seq, min_tetrads, min_score, limits);
+    finalize_search_results(raw, chrom_name, collect_families)
 }
 
 pub(super) fn find_raw_bytes_no_chunking(
@@ -689,6 +755,7 @@ pub(crate) fn shift_g4(g4: &mut G4, offset: usize) {
     g4.tetrad4 += offset;
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn find_with_sequence(
     seq: Arc<SequenceData>,
     min_tetrads: usize,
@@ -728,6 +795,34 @@ fn find_raw_with_sequence(
 
 pub fn render_csv_results(g4s: &[G4]) -> String {
     render_csv(g4s)
+}
+
+pub fn render_bedgraph_families(chrom: &str, families: &[G4Family]) -> String {
+    let mut ordered: Vec<&G4Family> = families
+        .iter()
+        .filter(|family| !family.members.is_empty())
+        .collect();
+    ordered.sort_by_key(|family| family.zero_based_start());
+    let mut out = String::new();
+    for family in ordered {
+        let span = family.span_length();
+        if span == 0 {
+            continue;
+        }
+        let count = family.count();
+        let mean = family.members.iter().map(|g| g.gscore as f64).sum::<f64>() / count as f64;
+        let density = (count as f64 / span as f64) * 100.0;
+        out.push_str(&format!(
+            "{chrom}\t{start}\t{end}\t{count}\t{mean:.4}\t{density:.4}\n",
+            chrom = chrom,
+            start = family.zero_based_start(),
+            end = family.zero_based_end(),
+            count = count,
+            mean = mean,
+            density = density,
+        ));
+    }
+    out
 }
 
 fn render_csv(g4s: &[G4]) -> String {
@@ -1111,7 +1206,15 @@ mod tests {
         sequence.push_str("GGGGAGGGGAGGGGAGGGG");
         sequence.push_str(&"T".repeat(10));
 
-        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
+        let chunked = find_owned_bytes_with_limits(
+            arc_from_sequence(&sequence),
+            "chunk",
+            4,
+            17,
+            limits,
+            false,
+        )
+        .g4s;
 
         let starts: Vec<_> = chunked.iter().map(|g| g.start).collect();
         assert_eq!(starts.len(), 2);
@@ -1131,7 +1234,15 @@ mod tests {
         sequence.push_str("GGGGAGGGGAGGGGAGGGG");
         sequence.push_str(&"T".repeat(32));
 
-        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
+        let chunked = find_owned_bytes_with_limits(
+            arc_from_sequence(&sequence),
+            "chunk",
+            4,
+            17,
+            limits,
+            false,
+        )
+        .g4s;
         let reference = find_with_sequence(Arc::new(SequenceData::new(&sequence)), 4, 17, limits);
 
         assert_eq!(g4_signatures(&chunked), g4_signatures(&reference));
@@ -1148,7 +1259,15 @@ mod tests {
         sequence.push_str("GGGGTTGGGGTTGGGGTTGGGG");
         sequence.push_str(&"C".repeat(24));
 
-        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
+        let chunked = find_owned_bytes_with_limits(
+            arc_from_sequence(&sequence),
+            "chunk",
+            4,
+            17,
+            limits,
+            false,
+        )
+        .g4s;
         let reference = find_with_sequence(Arc::new(SequenceData::new(&sequence)), 4, 17, limits);
 
         assert_eq!(g4_signatures(&chunked), g4_signatures(&reference));
@@ -1166,8 +1285,53 @@ mod tests {
     fn big_sequence_internal_equals_chunked() {
         let sequence = load_big_sequence();
         let limits = ScanLimits::default();
-        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 2, 17, limits);
+        let chunked = find_owned_bytes_with_limits(
+            arc_from_sequence(&sequence),
+            "chunk",
+            2,
+            17,
+            limits,
+            false,
+        )
+        .g4s;
         let internal = find_with_sequence(Arc::new(SequenceData::new(&sequence)), 2, 17, limits);
         assert_eq!(g4_signatures(&chunked), g4_signatures(&internal));
+    }
+
+    #[test]
+    fn bedgraph_renderer_matches_family_stats() {
+        let limits = ScanLimits::default();
+        let search = find_owned_bytes_with_limits(
+            arc_from_sequence("GGGGAGGGGAGGGGAGGGG"),
+            "chrTest",
+            4,
+            17,
+            limits,
+            true,
+        );
+        assert_eq!(search.chrom_name, "chrTest");
+        let families = search.families.expect("families present");
+        assert!(!families.is_empty());
+        let rendered = render_bedgraph_families(&search.chrom_name, &families);
+        let line = rendered.lines().next().expect("bedgraph line");
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[0], "chrTest");
+        let expected_count = families[0].count();
+        let parsed_count: usize = fields[3].parse().expect("count parse");
+        assert_eq!(parsed_count, expected_count);
+        let expected_mean = families[0]
+            .members
+            .iter()
+            .map(|g| g.gscore as f64)
+            .sum::<f64>()
+            / expected_count as f64;
+        let parsed_mean: f64 = fields[4].parse().expect("mean parse");
+        assert!((parsed_mean - expected_mean).abs() < 1e-4);
+        let span = families[0].span_length();
+        assert!(span > 0);
+        let expected_density = (expected_count as f64 / span as f64) * 100.0;
+        let parsed_density: f64 = fields[5].parse().expect("density parse");
+        assert!((parsed_density - expected_density).abs() < 1e-4);
     }
 }

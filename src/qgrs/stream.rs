@@ -7,8 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rayon::spawn;
 
 use super::{
-    G4, ScanLimits, chunk_size_for_limits, compute_chunk_overlap, consolidate_g4s,
-    find_raw_bytes_no_chunking, parse_chrom_name, shift_g4,
+    G4, ScanLimits, SearchResults, chunk_size_for_limits, compute_chunk_overlap,
+    finalize_search_results, find_raw_bytes_no_chunking, parse_chrom_name, shift_g4,
 };
 
 // debug helpers removed
@@ -46,6 +46,29 @@ where
     process_reader_with_limits(reader, min_tetrads, min_score, limits, &mut on_chromosome)
 }
 
+pub fn process_fasta_stream_with_limits_ex<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    collect_families: bool,
+    mut on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(SearchResults) -> io::Result<()>,
+{
+    let file = File::open(path)?;
+    let reader = BufReader::with_capacity(1 << 20, file);
+    process_reader_with_limits_ex(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        collect_families,
+        &mut on_chromosome,
+    )
+}
+
 pub fn process_reader<R, F>(
     reader: R,
     min_tetrads: usize,
@@ -66,7 +89,7 @@ where
 }
 
 pub fn process_reader_with_limits<R, F>(
-    mut reader: R,
+    reader: R,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
@@ -75,6 +98,25 @@ pub fn process_reader_with_limits<R, F>(
 where
     R: BufRead,
     F: FnMut(String, Vec<G4>) -> io::Result<()>,
+{
+    let mut adapter = |result: SearchResults| {
+        on_chromosome(result.chrom_name, result.g4s)?;
+        Ok(())
+    };
+    process_reader_with_limits_ex(reader, min_tetrads, min_score, limits, false, &mut adapter)
+}
+
+pub fn process_reader_with_limits_ex<R, F>(
+    mut reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    collect_families: bool,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(SearchResults) -> io::Result<()>,
 {
     let mut line = String::new();
     let mut chrom_index = 0usize;
@@ -87,12 +129,18 @@ where
         }
         if line.starts_with('>') {
             if let Some(chrom) = current.take() {
-                let (name, results) = chrom.finish();
-                on_chromosome(name, results)?;
+                let results = chrom.finish();
+                on_chromosome(results)?;
             }
             chrom_index += 1;
             let name = parse_chrom_name(&line, chrom_index);
-            current = Some(StreamChromosome::new(name, min_tetrads, min_score, limits));
+            current = Some(StreamChromosome::new(
+                name,
+                min_tetrads,
+                min_score,
+                limits,
+                collect_families,
+            ));
             continue;
         }
         if current.is_none() {
@@ -103,6 +151,7 @@ where
                 min_tetrads,
                 min_score,
                 limits,
+                collect_families,
             ));
         }
         if let Some(chrom) = current.as_mut() {
@@ -116,8 +165,8 @@ where
     }
 
     if let Some(chrom) = current {
-        let (name, results) = chrom.finish();
-        on_chromosome(name, results)?;
+        let results = chrom.finish();
+        on_chromosome(results)?;
         Ok(chrom_index.max(1))
     } else {
         Ok(0)
@@ -127,13 +176,21 @@ where
 struct StreamChromosome {
     name: String,
     scheduler: StreamChunkScheduler,
+    collect_families: bool,
 }
 
 impl StreamChromosome {
-    fn new(name: String, min_tetrads: usize, min_score: i32, limits: ScanLimits) -> Self {
+    fn new(
+        name: String,
+        min_tetrads: usize,
+        min_score: i32,
+        limits: ScanLimits,
+        collect_families: bool,
+    ) -> Self {
         Self {
             name,
             scheduler: StreamChunkScheduler::new(min_tetrads, min_score, limits),
+            collect_families,
         }
     }
 
@@ -141,9 +198,9 @@ impl StreamChromosome {
         self.scheduler.push_byte(byte);
     }
 
-    fn finish(self) -> (String, Vec<G4>) {
-        let results = self.scheduler.finish();
-        (self.name, results)
+    fn finish(self) -> SearchResults {
+        let raw_hits = self.scheduler.finish();
+        finalize_search_results(raw_hits, &self.name, self.collect_families)
     }
 }
 
@@ -248,6 +305,6 @@ impl StreamChunkScheduler {
                 combined.append(&mut chunk);
             }
         }
-        consolidate_g4s(combined)
+        combined
     }
 }

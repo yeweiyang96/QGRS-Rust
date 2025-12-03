@@ -54,8 +54,15 @@ fn main() {
     let mut batch_results: HashMap<String, Vec<_>> = HashMap::new();
     let limits = ScanLimits::default();
     for chrom in &sequences {
-        let hits =
-            find_owned_bytes_with_limits(chrom.sequence.clone(), min_tetrads, min_gscore, limits);
+        let hits = find_owned_bytes_with_limits(
+            chrom.sequence.clone(),
+            &chrom.name,
+            min_tetrads,
+            min_gscore,
+            limits,
+            false,
+        )
+        .g4s;
         batch_results.insert(chrom.name.clone(), hits);
     }
     let process_time = process_start.elapsed();

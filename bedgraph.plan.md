@@ -1,0 +1,10 @@
+# Plan: BedGraph Sidecar Families
+Extend the existing CSV/Parquet pipeline so users can optionally request a .bedgraph sidecar per sequence. find_owned_bytes_with_limits will accept the chromosome name plus a “collect families” flag; when true, it returns both consolidated hits (for CSV/Parquet) and the raw family groups needed for bedGraph records. Each bedGraph row represents one family using zero-based, half-open coordinates, “dataValue” columns defined as: col4 = family size (count), col5 = average gscore, col6 = density (count / length * 100). File basenames match the primary output with a .bedgraph suffix; inline runs reuse the chromosome name already available on ChromSequence.
+
+## Steps
+1. git checkout -b feature/bedgraph-sidecar to isolate work.
+2. Refactor mod.rs so consolidate_g4s exposes a group_g4_families(Vec<G4>) -> Vec<Vec<G4>> helper; update find_owned_bytes_with_limits signature to (sequence, chrom_name, collect_families, …) -> SearchResult containing consolidated hits plus optional family data.
+3. Ensure chunked and stream paths pass chrom.name into the updated API and only request families when --bedgraph is set, avoiding redundant work in non-bedGraph runs.
+4. Implement render_bedgraph_family(chrom, families) that sorts by family[0].start - 1, computes 0-based starts/ends, count/mean/density, and writes three-value data columns (count / average gscore / density); wrap in helpers that write .bedgraph files alongside CSV/Parquet using shared basenames.
+5. Extend CLI (qgrs.rs): parse --bedgraph, pass collect_families through inline/mmap/stream processing, and when flagged, invoke the new renderer to emit sidecar files; update usage text and README accordingly.
+6. Add unit tests for grouping determinism and bedGraph serialization (coordinate conversion, average/density math), plus CLI tests ensuring .bedgraph files appear only when --bedgraph is supplied.
