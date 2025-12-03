@@ -5,15 +5,20 @@
             "name": "Debug QGRS Rust",
             "type": "lldb",
             "request": "launch",
-			"cargo": {
-				"args": ["build" ,"--bin", "qgrs" ]
-			},
-            "program": "${workspaceFolder}/target/debug/qgrs",
-            "args": ["--file","${workspaceFolder}/big.txt","--output-dir","${workspaceFolder}/output"],
-            "cwd": "${workspaceFolder}",
-            "stopOnEntry": false,
-            "env": {},
-            "console": "integratedTerminal"
+            "cargo": {
+                "args": [
+                    "build",
+                    "--release",
+                    "--bin",
+                    "qgrs"
+                ]
+            },
+            "args": [
+                "--file",
+                "${workspaceFolder}/big.txt",
+                "--output-dir",
+                "${workspaceFolder}/output"
+            ],
         }
     ]
 }

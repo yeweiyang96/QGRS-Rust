@@ -8,7 +8,7 @@ use rayon::spawn;
 
 use super::{
     G4, ScanLimits, chunk_size_for_limits, compute_chunk_overlap, consolidate_g4s,
-    find_raw_owned_no_chunking, parse_chrom_name, shift_g4,
+    find_raw_bytes_no_chunking, parse_chrom_name, shift_g4,
 };
 
 // debug helpers removed
@@ -110,7 +110,7 @@ where
                 if byte.is_ascii_whitespace() {
                     continue;
                 }
-                chrom.push_byte(byte);
+                chrom.push_byte(byte.to_ascii_lowercase());
             }
         }
     }
@@ -228,15 +228,9 @@ impl StreamChunkScheduler {
         let tx = self.tx.clone();
         self.inflight += 1;
         spawn(move || {
-            // per-chunk diagnostic removed
-
-            // Convert the collected bytes to a String without per-byte char mapping.
-            // Genomic input is ASCII, so `from_utf8_unchecked` is safe and avoids
-            // an extra validation pass compared to `from_utf8`.
-            let sequence: String = unsafe { String::from_utf8_unchecked(chunk) };
             // Use the no-chunking variant here: the scheduler already supplied
             // a window (primary + overlap) and we must not re-chunk it.
-            let mut hits = find_raw_owned_no_chunking(sequence, min_tetrads, min_score, limits);
+            let mut hits = find_raw_bytes_no_chunking(chunk, min_tetrads, min_score, limits);
             for g4 in &mut hits {
                 shift_g4(g4, offset);
             }

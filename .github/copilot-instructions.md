@@ -85,13 +85,13 @@ Merges overlapping G4 candidates into representative families:
 
 ### Key Functions
 ```rust
-// Entry points (pick based on ownership)
-find_with_limits(&str, ...) -> Vec<G4>           // Borrow, auto-chunks
-find_owned_with_limits(String, ...) -> Vec<G4>   // Owned String, auto-chunks
-find_owned_bytes_with_limits(Arc<Vec<u8>>, ...)  // Zero-copy, parallel chunks
+// Public entry points
+find_owned_bytes(Arc<Vec<u8>>, ...) -> Vec<G4>              // Default limits helper
+find_owned_bytes_with_limits(Arc<Vec<u8>>, ...) -> Vec<G4>  // Zero-copy, parallel chunks
 
-// Raw (unconsolidated) variant
-find_raw_owned_with_limits(String, ...) -> Vec<G4>  // Unused in main pipeline, kept for debugging
+// Raw (unconsolidated) helpers
+find_raw_bytes_no_chunking(Vec<u8>, ...) -> Vec<G4>         // Stream workers, window slices
+find_raw_on_window_bytes(Arc<Vec<u8>>, ...) -> Vec<G4>      // Chunked mmap windows
 
 // Internal building blocks
 consolidate_g4s(Vec<G4>) -> Vec<G4>              // Dedup + family merge
@@ -102,7 +102,7 @@ maximum_length(tetrads, limits) -> usize         // 2 tetrads→30bp, 3+→45bp
 `StreamChromosome` maintains sliding window state, dispatches chunks to Rayon workers, merges results on chromosome boundary. No consolidation per-chunk—raw hits accumulated, then single `consolidate_g4s()` call on finish.
 
 ### CLI Orchestration (`src/bin/qgrs.rs`)
-- **Inline sequence**: `--sequence` → direct call to `find_*` variants → write single file
+- **Inline sequence**: `--sequence` → normalize to lowercase bytes → `find_owned_bytes_with_limits()`
 - **FASTA file**: 
   - `mmap` mode: `load_sequences_from_path()` → `Vec<ChromSequence>` → parallel `into_par_iter()` → per-chromosome `find_owned_bytes_with_limits()` → write outputs
   - `stream` mode: `process_fasta_stream_with_limits()` → callback per chromosome → write outputs
@@ -138,7 +138,7 @@ cargo test --lib -- --nocapture         # See println! output
 4. Add `extension()` case and CLI `--format` parser
 
 ### Debugging Consolidation Issues
-Use `find_raw_owned_internal()` to get unconsolidated hits, print before/after `consolidate_g4s()`. Check `DedupKey` hash collisions and family overlap logic (`overlapped()`, `belongs_in()`).
+Use `find_raw_bytes_no_chunking()` (for ad-hoc slices) or `find_raw_on_window_bytes()` to collect unconsolidated hits, then print before/after `consolidate_g4s()`. Check `DedupKey` hash collisions and family overlap logic (`overlapped()`, `belongs_in()`).
 
 ## Project-Specific Conventions
 
@@ -163,7 +163,7 @@ src/
 ## Avoiding Common Pitfalls
 
 1. **Dedup order matters**: After HashMap-based dedup, MUST `sort_by((start, end))` before family grouping. Otherwise chunk/stream modes diverge due to insertion order variance.
-2. **Don't re-chunk in stream workers**: `find_raw_owned_no_chunking()` used by stream to prevent nested chunking.
+2. **Don't re-chunk in stream workers**: `find_raw_bytes_no_chunking()` consumes scheduler windows directly to prevent nested chunking.
 3. **Test with `big.txt`**: Reference dataset includes edge cases (overlapping families, 2-tetrad max_length=30). Always validate against legacy `big.csv`.
 4. **Arc cloning is cheap**: `Arc<Vec<u8>>` clones only increment refcount. Safe to pass into Rayon closures without copying sequences.
 

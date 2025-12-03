@@ -77,12 +77,8 @@ struct SequenceData {
 }
 
 impl SequenceData {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn new(sequence: &str) -> Self {
-        let normalized = Arc::new(sequence.to_ascii_lowercase().into_bytes());
-        Self { normalized }
-    }
-
-    fn from_owned(sequence: String) -> Self {
         let normalized = Arc::new(sequence.to_ascii_lowercase().into_bytes());
         Self { normalized }
     }
@@ -548,59 +544,8 @@ pub(super) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
     results
 }
 
-pub fn find(sequence: &str, min_tetrads: usize, min_score: i32) -> Vec<G4> {
-    find_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
-}
-
-pub fn find_with_limits(
-    sequence: &str,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-) -> Vec<G4> {
-    let chunk_size = chunk_size_for_limits(limits);
-    if sequence.len() > chunk_size {
-        return find_owned_chunked(
-            sequence.to_string(),
-            min_tetrads,
-            min_score,
-            limits,
-            chunk_size,
-        );
-    }
-    let seq = Arc::new(SequenceData::new(sequence));
-    find_with_sequence(seq, min_tetrads, min_score, limits)
-}
-
-pub fn find_owned(sequence: String, min_tetrads: usize, min_score: i32) -> Vec<G4> {
-    find_owned_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
-}
-
-pub fn find_owned_with_limits(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-) -> Vec<G4> {
-    let chunk_size = chunk_size_for_limits(limits);
-    if sequence.len() > chunk_size {
-        return find_owned_chunked(sequence, min_tetrads, min_score, limits, chunk_size);
-    }
-    find_owned_internal(sequence, min_tetrads, min_score, limits)
-}
-
-/// Like `find_owned_with_limits` but returns raw (un-consolidated) G4 candidates.
-pub fn find_raw_owned_with_limits(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-) -> Vec<G4> {
-    let chunk_size = chunk_size_for_limits(limits);
-    if sequence.len() > chunk_size {
-        return find_raw_owned_chunked(sequence, min_tetrads, min_score, limits, chunk_size);
-    }
-    find_raw_owned_internal(sequence, min_tetrads, min_score, limits)
+pub fn find_owned_bytes(sequence: Arc<Vec<u8>>, min_tetrads: usize, min_score: i32) -> Vec<G4> {
+    find_owned_bytes_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
 }
 
 pub fn find_owned_bytes_with_limits(
@@ -651,105 +596,15 @@ pub fn find_owned_bytes_with_limits(
     find_with_sequence(seq, min_tetrads, min_score, limits)
 }
 
-fn find_owned_internal(
-    sequence: String,
+pub(super) fn find_raw_bytes_no_chunking(
+    mut sequence: Vec<u8>,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
-    let seq = Arc::new(SequenceData::from_owned(sequence));
-    find_with_sequence(seq, min_tetrads, min_score, limits)
-}
-
-fn find_raw_owned_internal(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-) -> Vec<G4> {
-    let seq = Arc::new(SequenceData::from_owned(sequence));
+    sequence.make_ascii_lowercase();
+    let seq = Arc::new(SequenceData::from_bytes(Arc::new(sequence)));
     find_raw_with_sequence(seq, min_tetrads, min_score, limits)
-}
-
-// Provide a parent-visible wrapper that guarantees no further chunking is
-// performed. This is used by the stream worker which already manages chunk
-// boundaries and must not re-chunk the provided window.
-pub(super) fn find_raw_owned_no_chunking(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-) -> Vec<G4> {
-    find_raw_owned_internal(sequence, min_tetrads, min_score, limits)
-}
-
-fn find_owned_chunked(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-    chunk_size: usize,
-) -> Vec<G4> {
-    let len = sequence.len();
-    if len <= chunk_size {
-        return find_owned_internal(sequence, min_tetrads, min_score, limits);
-    }
-    let overlap = compute_chunk_overlap(min_tetrads, limits);
-    let mut start = 0usize;
-    let mut chunks = Vec::new();
-    while start < len {
-        let primary_end = (start + chunk_size).min(len);
-        let window_end = (primary_end + overlap).min(len);
-        let chunk = sequence[start..window_end].to_string();
-        let _is_last = primary_end == len;
-        chunks.push((start, primary_end, _is_last, chunk));
-        start = primary_end;
-    }
-    // Merge all chunk hits (no cutoff filtering) and let consolidate_g4s do global de-duplication.
-    // For chunked owned inputs we want to collect raw candidates from each
-    // chunk (without per-chunk consolidation) and then perform a single
-    // global consolidate_g4s pass so that family/merge decisions are made
-    // with the full context.
-    let merged_raw: Vec<G4> = chunks
-        .into_par_iter()
-        .flat_map_iter(|(offset, _cutoff, _is_last, chunk)| {
-            let hits = find_raw_owned_internal(chunk, min_tetrads, min_score, limits);
-            hits.into_iter().map(move |mut g4| {
-                shift_g4(&mut g4, offset);
-                g4
-            })
-        })
-        .collect();
-    consolidate_g4s(merged_raw)
-}
-
-fn find_raw_owned_chunked(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-    chunk_size: usize,
-) -> Vec<G4> {
-    let len = sequence.len();
-    if len <= chunk_size {
-        return find_raw_owned_internal(sequence, min_tetrads, min_score, limits);
-    }
-    let overlap = compute_chunk_overlap(min_tetrads, limits);
-    let mut start = 0usize;
-    let mut out = Vec::new();
-    while start < len {
-        let primary_end = (start + chunk_size).min(len);
-        let window_end = (primary_end + overlap).min(len);
-        let chunk = sequence[start..window_end].to_string();
-        let _is_last = primary_end == len;
-        let hits = find_raw_owned_internal(chunk, min_tetrads, min_score, limits);
-        for mut g4 in hits {
-            shift_g4(&mut g4, start);
-            out.push(g4);
-        }
-        start = primary_end;
-    }
-    out
 }
 
 // Zero-copy windowed raw search: scan `window` (a slice of the full sequence)
@@ -842,6 +697,7 @@ fn find_with_sequence(
 ) -> Vec<G4> {
     // Find raw candidates first
     let raw = find_raw_with_sequence(seq, min_tetrads, min_score, limits);
+    print!("{}", raw.len());
     // Then consolidate families
     consolidate_g4s(raw)
 }
@@ -868,34 +724,6 @@ fn find_raw_with_sequence(
         }
     }
     raw_g4s
-}
-
-pub fn find_csv(sequence: &str, min_tetrads: usize, min_score: i32) -> String {
-    find_csv_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
-}
-
-pub fn find_csv_with_limits(
-    sequence: &str,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-) -> String {
-    let results = find_with_limits(sequence, min_tetrads, min_score, limits);
-    render_csv(&results)
-}
-
-pub fn find_csv_owned(sequence: String, min_tetrads: usize, min_score: i32) -> String {
-    find_csv_owned_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
-}
-
-pub fn find_csv_owned_with_limits(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-) -> String {
-    let results = find_owned_with_limits(sequence, min_tetrads, min_score, limits);
-    render_csv(&results)
 }
 
 pub fn render_csv_results(g4s: &[G4]) -> String {
@@ -968,58 +796,6 @@ impl std::error::Error for ExportError {
             ExportError::Parquet(err) => Some(err),
         }
     }
-}
-
-pub fn write_parquet<W: Write + Send + 'static>(
-    sequence: &str,
-    min_tetrads: usize,
-    min_score: i32,
-    writer: W,
-) -> Result<(), ExportError> {
-    write_parquet_with_limits(
-        sequence,
-        min_tetrads,
-        min_score,
-        ScanLimits::default(),
-        writer,
-    )
-}
-
-pub fn write_parquet_with_limits<W: Write + Send + 'static>(
-    sequence: &str,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-    writer: W,
-) -> Result<(), ExportError> {
-    let results = find_with_limits(sequence, min_tetrads, min_score, limits);
-    write_parquet_from_results(&results, writer)
-}
-
-pub fn write_parquet_owned<W: Write + Send + 'static>(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    writer: W,
-) -> Result<(), ExportError> {
-    write_parquet_owned_with_limits(
-        sequence,
-        min_tetrads,
-        min_score,
-        ScanLimits::default(),
-        writer,
-    )
-}
-
-pub fn write_parquet_owned_with_limits<W: Write + Send + 'static>(
-    sequence: String,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
-    writer: W,
-) -> Result<(), ExportError> {
-    let results = find_owned_with_limits(sequence, min_tetrads, min_score, limits);
-    write_parquet_from_results(&results, writer)
 }
 
 pub fn write_parquet_results<W: Write + Send + 'static>(
@@ -1199,6 +975,10 @@ mod tests {
 
     type G4Signature = (usize, usize, usize, usize, i32, i32, i32, i32, String);
 
+    fn arc_from_sequence(seq: &str) -> Arc<Vec<u8>> {
+        Arc::new(seq.bytes().map(|b| b.to_ascii_lowercase()).collect())
+    }
+
     fn g4_signatures(g4s: &[G4]) -> Vec<G4Signature> {
         let mut sigs: Vec<_> = g4s
             .iter()
@@ -1223,7 +1003,7 @@ mod tests {
     #[test]
     fn finds_single_g4() {
         let sequence = "GGGGAGGGGAGGGGAGGGG";
-        let results = find(sequence, 4, 17);
+        let results = find_owned_bytes(arc_from_sequence(sequence), 4, 17);
         assert_eq!(results.len(), 1);
         let g = &results[0];
         assert_eq!(g.start, 1);
@@ -1236,14 +1016,15 @@ mod tests {
 
     #[test]
     fn empty_sequence_has_no_hits() {
-        let results = find("ACACAC", 4, 17);
+        let results = find_owned_bytes(arc_from_sequence("ACACAC"), 4, 17);
         assert!(results.is_empty());
     }
 
     #[test]
     fn csv_output_includes_header_and_rows() {
         let sequence = "GGGGAGGGGAGGGGAGGGG";
-        let csv = find_csv(sequence, 4, 17);
+        let results = find_owned_bytes(arc_from_sequence(sequence), 4, 17);
+        let csv = render_csv_results(&results);
         assert!(csv.starts_with("start,end,length"));
         assert!(csv.contains("GGGGAGGGGAGGGGAGGGG"));
     }
@@ -1253,7 +1034,8 @@ mod tests {
         let sequence = "GGGGAGGGGAGGGGAGGGG";
         let path = env::temp_dir().join("qgrs_parquet_test.parquet");
         let file = fs::File::create(&path).expect("temp parquet file");
-        write_parquet(sequence, 4, 17, file).expect("parquet export");
+        let results = find_owned_bytes(arc_from_sequence(sequence), 4, 17);
+        write_parquet_results(&results, file).expect("parquet export");
         let metadata = fs::metadata(&path).expect("metadata");
         assert!(metadata.len() > 0);
         let _ = fs::remove_file(&path);
@@ -1293,7 +1075,7 @@ mod tests {
         let sequences = load_sequences_from_path(&path, InputMode::Stream).unwrap();
         let mut expected: HashMap<String, Vec<G4>> = HashMap::new();
         for chrom in &sequences {
-            let hits = find_owned(chrom.as_uppercase_string(), 2, 17);
+            let hits = find_owned_bytes(chrom.sequence.clone(), 2, 17);
             expected.insert(chrom.name.clone(), hits);
         }
         let mut actual: HashMap<String, Vec<G4>> = HashMap::new();
@@ -1329,7 +1111,7 @@ mod tests {
         sequence.push_str("GGGGAGGGGAGGGGAGGGG");
         sequence.push_str(&"T".repeat(10));
 
-        let chunked = find_owned_chunked(sequence, 4, 17, limits, chunk_size);
+        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
 
         let starts: Vec<_> = chunked.iter().map(|g| g.start).collect();
         assert_eq!(starts.len(), 2);
@@ -1349,12 +1131,7 @@ mod tests {
         sequence.push_str("GGGGAGGGGAGGGGAGGGG");
         sequence.push_str(&"T".repeat(32));
 
-        let chunked = find_owned_bytes_with_limits(
-            Arc::new(sequence.bytes().map(|b| b.to_ascii_lowercase()).collect()),
-            4,
-            17,
-            limits,
-        );
+        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
         let reference = find_with_sequence(Arc::new(SequenceData::new(&sequence)), 4, 17, limits);
 
         assert_eq!(g4_signatures(&chunked), g4_signatures(&reference));
@@ -1371,12 +1148,7 @@ mod tests {
         sequence.push_str("GGGGTTGGGGTTGGGGTTGGGG");
         sequence.push_str(&"C".repeat(24));
 
-        let chunked = find_owned_bytes_with_limits(
-            Arc::new(sequence.bytes().map(|b| b.to_ascii_lowercase()).collect()),
-            4,
-            17,
-            limits,
-        );
+        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
         let reference = find_with_sequence(Arc::new(SequenceData::new(&sequence)), 4, 17, limits);
 
         assert_eq!(g4_signatures(&chunked), g4_signatures(&reference));
@@ -1394,9 +1166,8 @@ mod tests {
     fn big_sequence_internal_equals_chunked() {
         let sequence = load_big_sequence();
         let limits = ScanLimits::default();
-        let chunk_size = chunk_size_for_limits(limits);
-        let chunked = find_owned_chunked(sequence.clone(), 2, 17, limits, chunk_size);
-        let internal = find_owned_internal(sequence, 2, 17, limits);
+        let chunked = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 2, 17, limits);
+        let internal = find_with_sequence(Arc::new(SequenceData::new(&sequence)), 2, 17, limits);
         assert_eq!(g4_signatures(&chunked), g4_signatures(&internal));
     }
 }

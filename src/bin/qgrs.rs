@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use qgrs_rust::{DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ScanLimits, qgrs};
 use rayon::ThreadPoolBuilder;
@@ -217,9 +218,13 @@ fn process_inline_sequence(
     min_score: i32,
     limits: ScanLimits,
 ) -> Result<(), String> {
+    let mut normalized = sequence.into_bytes();
+    normalized.make_ascii_lowercase();
+    let results =
+        qgrs::find_owned_bytes_with_limits(Arc::new(normalized), min_tetrads, min_score, limits);
     match format {
         OutputFormat::Csv => {
-            let csv = qgrs::find_csv_owned_with_limits(sequence, min_tetrads, min_score, limits);
+            let csv = qgrs::render_csv_results(&results);
             if let Some(path) = output_path {
                 fs::write(&path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?
             } else {
@@ -231,7 +236,7 @@ fn process_inline_sequence(
                 output_path.ok_or_else(|| usage("--output is required when --format parquet"))?;
             let file = fs::File::create(&path)
                 .map_err(|err| format!("failed to create {path:?}: {err}"))?;
-            qgrs::write_parquet_owned_with_limits(sequence, min_tetrads, min_score, limits, file)
+            qgrs::write_parquet_results(&results, file)
                 .map_err(|err| format!("failed to write parquet: {err}"))?;
         }
     }
@@ -418,5 +423,12 @@ mod tests {
         let original = env::args_os().collect::<Vec<_>>();
         let _ = original;
         run_env(argv.into_iter().skip(1))
+    }
+
+    #[test]
+    fn test() {
+        let result = run_with_args(["--file", "big.txt", "--output-dir", "output/test"]);
+        // assert!(result.is_err());
+        print!("{:?}", result);
     }
 }
