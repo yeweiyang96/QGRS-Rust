@@ -24,7 +24,7 @@ pub fn find_owned_bytes_with_limits(
         let len = sequence.len();
         let overlap = compute_chunk_overlap(min_tetrads, limits);
         let mut start = 0usize;
-        let seq_arc = sequence.clone();
+        let seq_data = Arc::new(SequenceData::from_bytes(sequence.clone()));
         let windows: Vec<(usize, usize, usize)> = {
             let mut v = Vec::new();
             while start < len {
@@ -38,12 +38,11 @@ pub fn find_owned_bytes_with_limits(
         let merged_raw: Vec<G4> = windows
             .into_par_iter()
             .flat_map_iter(|(offset, primary_end, window_end)| {
-                let window_slice = &seq_arc[offset..window_end];
                 let hits = find_raw_on_window_bytes(
-                    seq_arc.clone(),
+                    seq_data.clone(),
                     offset,
                     primary_end,
-                    window_slice,
+                    window_end,
                     min_tetrads,
                     min_score,
                     limits,

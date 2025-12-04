@@ -279,6 +279,11 @@ fn process_fasta_file(
                     );
                     println!("chromosome: {}, g4 raw hits: {}", name, raw.len());
                     let results = qgrs::consolidate_g4s(raw);
+                    println!(
+                        "chromosome: {}, g4 consolidated hits: {}",
+                        name,
+                        results.len()
+                    );
                     match format {
                         OutputFormat::Csv => {
                             let csv = qgrs::render_csv_results(&results);

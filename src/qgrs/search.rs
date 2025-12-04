@@ -1,9 +1,25 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
 
 use memchr::memchr2;
 
 use crate::qgrs::data::{ScanLimits, SequenceData, SequenceSlice, is_g};
+
+// Invariants for the raw-search layer:
+// 1. All coordinates remain 0-based half-open internally. `G4::start` is adjusted
+//    to 1-based when materializing results, so upstream logic must not re-shift.
+// 2. Chunked scans provide windows shaped as (primary, primary + overlap). This
+//    module must clamp every emission to `primary_end` so overlap regions do not
+//    double-count. Stream workers follow the same rule and must never re-chunk
+//    the window they receive from the scheduler.
+// 3. Raw finders never perform deduplication. Callers are responsible for passing
+//    concatenated hits to `consolidate_g4s` to preserve parity across mmap and
+//    streaming paths.
+
+thread_local! {
+    static LOOP_BUFFER: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(16));
+}
 
 #[derive(Debug)]
 pub struct G4 {
@@ -19,7 +35,9 @@ pub struct G4 {
     pub tetrads: usize,
     pub length: usize,
     pub gscore: i32,
-    pub(crate) sequence_view: SequenceSlice,
+    slice_start: usize,
+    sequence_data: Arc<Vec<u8>>,
+    slice_cache: OnceLock<SequenceSlice>,
     sequence_cache: OnceLock<String>,
 }
 
@@ -27,8 +45,6 @@ impl G4 {
     fn from_candidate(candidate: &G4Candidate) -> Self {
         let length = candidate.length();
         let end = candidate.start + length;
-        let normalized = candidate.seq.normalized.clone();
-        let sequence_view = SequenceSlice::new(normalized, candidate.start, length);
         Self {
             start: candidate.start + 1,
             end,
@@ -42,14 +58,24 @@ impl G4 {
             tetrads: candidate.num_tetrads,
             length,
             gscore: candidate.score(),
-            sequence_view,
+            slice_start: candidate.start,
+            sequence_data: candidate.seq.normalized.clone(),
+            slice_cache: OnceLock::new(),
             sequence_cache: OnceLock::new(),
         }
     }
 
     pub fn sequence(&self) -> &str {
         self.sequence_cache
-            .get_or_init(|| self.sequence_view.to_uppercase_string())
+            .get_or_init(|| self.sequence_slice().to_uppercase_string())
+    }
+
+    pub(crate) fn sequence_slice(&self) -> SequenceSlice {
+        self.slice_cache
+            .get_or_init(|| {
+                SequenceSlice::new(self.sequence_data.clone(), self.slice_start, self.length)
+            })
+            .clone()
     }
 }
 
@@ -68,7 +94,9 @@ impl Clone for G4 {
             tetrads: self.tetrads,
             length: self.length,
             gscore: self.gscore,
-            sequence_view: self.sequence_view.clone(),
+            slice_start: self.slice_start,
+            sequence_data: self.sequence_data.clone(),
+            slice_cache: OnceLock::new(),
             sequence_cache: OnceLock::new(),
         }
     }
@@ -220,21 +248,24 @@ impl G4Candidate {
     fn expand(&self) -> Vec<G4Candidate> {
         let mut results = Vec::new();
         if let Some(cursor) = self.cursor() {
-            let mut ys = Vec::new();
-            self.find_loop_lengths_from(&mut ys, cursor);
-            for y in ys {
-                let mut next = self.clone();
-                if next.y1 < 0 {
-                    next.y1 = y;
-                } else if next.y2 < 0 {
-                    next.y2 = y;
-                } else if next.y3 < 0 {
-                    next.y3 = y;
+            LOOP_BUFFER.with(|slot| {
+                let mut ys = slot.borrow_mut();
+                ys.clear();
+                self.find_loop_lengths_from(&mut ys, cursor);
+                for &y in ys.iter() {
+                    let mut next = self.clone();
+                    if next.y1 < 0 {
+                        next.y1 = y;
+                    } else if next.y2 < 0 {
+                        next.y2 = y;
+                    } else if next.y3 < 0 {
+                        next.y3 = y;
+                    }
+                    if next.partial_length() <= next.max_length as i32 {
+                        results.push(next);
+                    }
                 }
-                if next.partial_length() <= next.max_length as i32 {
-                    results.push(next);
-                }
-            }
+            });
         }
         results
     }
@@ -298,15 +329,19 @@ pub(crate) fn find_raw_bytes_no_chunking(
 }
 
 pub(crate) fn find_raw_on_window_bytes(
-    seq_bytes_arc: Arc<Vec<u8>>,
+    seq: Arc<SequenceData>,
     base_offset: usize,
     primary_end: usize,
-    window: &[u8],
+    window_end: usize,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
-    let seq = Arc::new(SequenceData::from_bytes(seq_bytes_arc));
+    // Called by chunked batch scans only. The chunk scheduler already shapes
+    // windows as (primary, primary+overlap) and expects this function to avoid
+    // emitting hits whose start ≥ primary_end so that overlap regions don't
+    // double-count.
+    let window = &seq.normalized[base_offset..window_end];
     let mut cands = VecDeque::new();
     let mut max_tetrads_allowed = limits.max_g_run;
     if limits.max_g4_length >= 4 {
@@ -324,8 +359,12 @@ pub(crate) fn find_raw_on_window_bytes(
                 if tetrads * 4 > limits.max_g4_length {
                     break;
                 }
-                let max_offset = capped_run_len - tetrads;
-                for offset in 0..=max_offset {
+                let base_max_offset = capped_run_len - tetrads;
+                // Ensure each raw hit is emitted by at most one window by
+                // clamping offsets to the primary section of the chunk.
+                let boundary_offset = primary_end.saturating_sub(run_start + 1);
+                let allowed_offset = base_max_offset.min(boundary_offset);
+                for offset in 0..=allowed_offset {
                     let start = run_start + offset;
                     cands.push_back(G4Candidate::new(seq.clone(), tetrads, start, limits));
                 }
@@ -347,7 +386,7 @@ pub(crate) fn find_raw_on_window_bytes(
             }
         }
     }
-
+    raw_g4s.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
     raw_g4s
 }
 
@@ -372,6 +411,7 @@ pub(crate) fn find_raw_with_sequence(
             }
         }
     }
+    raw_g4s.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
     raw_g4s
 }
 

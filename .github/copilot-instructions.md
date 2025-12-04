@@ -25,10 +25,9 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 - `chunk_size_for_limits()` 基于 `ScanLimits.max_g4_length` + padding，范围固定在 32~64bp。
 - `compute_chunk_overlap()` 始终返回 `max_g4_length`，避免窗口边缘截断。
 - 大序列拆成 `(start, primary_end, window_end)`，使用 Rayon `into_par_iter().flat_map_iter()` 聚合；短序列直接调用 `find_with_sequence()`。
+- chunk 分派顺序与合并顺序一致，`flat_map_iter` 在 `Vec` 上保持窗口顺序，且 `find_raw_on_window_bytes` 内部按坐标扫描，因此 `merged_raw` 天然保持排序。
 
 ### 家族合并 (`consolidation.rs`)
-- `DedupKey = (start, end, SequenceSlice)`，保留最高 gscore；
-- 去重结果按 `(start, end)` 排序后线性扫描，`belongs_in` 判断是否重叠；
 - 每个家族输出最高 gscore 的成员，以确保 deterministic 输出。
 
 ## Streaming 管线 (`src/qgrs/stream.rs`)
@@ -66,7 +65,7 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 
 ## 关键约定与陷阱
 1. **坐标体系**：内部 0-based 半开区间 `[start,end)`；输出 start+1、end inclusive，CSV/Parquet 必须保持一致。
-2. **排序后合并**：`consolidate_g4s` 在排序后的 raw hits 上工作，确保家族顺序 deterministic。
+2. **排序后合并**：`consolidate_g4s` 在排序后的 raw hits 上工作，mmap模式下raw已经是顺序的,确保家族顺序 deterministic。
 3. **Stream worker 禁止再分块**：`StreamChunkScheduler` 已提供 overlap，worker 只能直接跑 `find_raw_bytes_no_chunking()`。
 4. **避免调试输出**：库函数不得打印 stdout；如需调试请加 feature flag 或日志。
 5. **Arc clone 便宜**：`Arc<Vec<u8>>` clone 仅递增引用计数，可在 Rayon worker 中放心复用。

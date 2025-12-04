@@ -246,6 +246,7 @@ impl StreamChunkScheduler {
                 combined.append(&mut chunk);
             }
         }
+        combined.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
         consolidate_g4s(combined)
     }
 }
