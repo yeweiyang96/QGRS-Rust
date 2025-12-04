@@ -5,7 +5,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use qgrs_rust::{DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ScanLimits, qgrs};
+use qgrs_rust::qgrs::{self, DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ScanLimits};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
@@ -264,12 +264,12 @@ fn process_fasta_file(
             }
             let mut chrom_outputs = Vec::with_capacity(sequences.len());
             for chrom in sequences {
-                let filename = next_output_filename(&chrom.name, format, &mut name_counts);
+                let filename = next_output_filename(chrom.name(), format, &mut name_counts);
                 chrom_outputs.push((chrom, dir.join(filename)));
             }
             chrom_outputs.into_par_iter().try_for_each(
                 |(chrom, filepath)| -> Result<(), String> {
-                    let qgrs::ChromSequence { name, sequence } = chrom;
+                    let (name, sequence) = chrom.into_parts();
                     let results = qgrs::find_owned_bytes_with_limits(
                         sequence,
                         min_tetrads,

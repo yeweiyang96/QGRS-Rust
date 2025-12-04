@@ -1,181 +1,96 @@
 # QGRS-Rust AI Coding Agent Instructions
 
-## Project Overview
-G-quadruplex (G4) detection tool rewritten in Rust. Scans DNA/RNA sequences using legacy scoring heuristics with modern zero-copy architecture. Dual pipeline: memory-mapped (`mmap`) for random access, streaming for multi-GB FASTA files.
+## 项目概览
+QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公式扫描 DNA/RNA 序列。特点：
 
-## Architecture Fundamentals
+- `mmap` 与 `stream` 两种读入模式，覆盖常规和超大 FASTA；
+- 完整零拷贝：内部统一小写 `Arc<Vec<u8>>`，输出时再 uppercase；
+- BFS 扩展 + 去重/家族合并，确保 chunk 与 stream 完全一致；
+- CLI 支持 inline 序列、批量 FASTA、CSV/Parquet 导出，并附带差异/基准工具。
 
-### Core Search Pipeline (`src/qgrs/mod.rs`)
-**Data Flow**: Raw bytes → `SequenceData` (Arc-wrapped lowercase) → BFS candidate expansion → raw `G4` hits → deduplication → family consolidation → final results
+## 模块与 API 边界
+- `src/lib.rs` 只暴露 `pub mod qgrs;`，crate 根不再 re-export 任何函数。
+- 对外 API 通过 `qgrs_rust::qgrs::*`，当前仅为 CLI/内部工具服务，默认不承诺稳定库接口。
+- `ChromSequence` 字段为 `pub(crate)`，外部仅可通过 `name()`, `sequence()`, `into_parts()` 访问；`SequenceData`、`SequenceSlice` 等辅助类型保持 crate-private。
 
-- **Zero-copy design**: `ChromSequence` stores `Arc<Vec<u8>>` (lowercase). Output sequences lazily uppercased via `G4::sequence()` using `OnceLock<String>`.
-- **Chunking strategy**: Long sequences split at `chunk_size_for_limits()` with `compute_chunk_overlap()` margin. Each chunk processed via `find_raw_on_window_bytes()`, results merged globally.
-- **Deduplication**: `consolidate_g4s()` uses `HashMap<DedupKey, G4>` keeping highest `gscore` per `(start, end, sequence)` tuple before family grouping. Critical: Must sort by `(start, end)` after dedup to ensure deterministic family formation across chunk/stream modes.
+## 核心搜索流程
+1. 原始 FASTA 字节归一化为 `SequenceData`（小写 `Arc<Vec<u8>>`）。
+2. `GRunScanner` 使用 `memchr2` 查找 G-run，生成 BFS 种子。
+3. `G4Candidate::expand` 穷举三个 loop 长度（`find_loop_lengths_from`），确保 `partial_length() <= maximum_length()`。
+4. `G4Candidate::score()` 保留与 C++ 一致的 `floor(gmax - gavg + gmax*(tetrads-2))`。
+5. `find_raw_on_window_bytes` / `find_raw_bytes_no_chunking` 生成 raw 命中；`consolidate_g4s` 去重并按染色体家族挑选最高分。
+6. 结果通过 `render_csv_results` 或 `write_parquet_results` 输出。
 
-### BFS Candidate Expansion Algorithm
-The search uses breadth-first expansion to enumerate all valid G4 structures:
+### 分块策略
+- `chunk_size_for_limits()` 基于 `ScanLimits.max_g4_length` + padding，范围固定在 32~64bp。
+- `compute_chunk_overlap()` 始终返回 `max_g4_length`，避免窗口边缘截断。
+- 大序列拆成 `(start, primary_end, window_end)`，使用 Rayon `into_par_iter().flat_map_iter()` 聚合；短序列直接调用 `find_with_sequence()`。
 
-1. **Seeding** (`seed_queue`): Scan sequence with `GRunScanner` (SIMD-accelerated `memchr2`) to find G-runs meeting `min_tetrads` ≤ length ≤ `max_g_run`. For each run, generate candidates at every valid offset (e.g., run of 5 Gs with `min_tetrads=2` yields candidates at positions 0-3 within the run for 2-tetrad, 3-tetrad structures).
+### 家族合并 (`consolidation.rs`)
+- `DedupKey = (start, end, SequenceSlice)`，保留最高 gscore；
+- 去重结果按 `(start, end)` 排序后线性扫描，`belongs_in` 判断是否重叠；
+- 每个家族输出最高 gscore 的成员，以确保 deterministic 输出。
 
-2. **BFS Loop** (`find_raw_with_sequence`):
-   ```rust
-   while let Some(cand) = cands.pop_front() {
-       if cand.complete() {           // All three loops (y1,y2,y3) assigned
-           if cand.viable(min_score) { // Passes score & length checks
-               raw_g4s.push(G4::from_candidate(&cand));
-           }
-       } else {
-           for expanded in cand.expand() {  // Fill next unassigned loop
-               cands.push_back(expanded);
-           }
-       }
-   }
-   ```
+## Streaming 管线 (`src/qgrs/stream.rs`)
+`StreamChromosome` 管理每条染色体，`StreamChunkScheduler` 维护缓冲区、offset 与 worker 信道：
+- FASTA 逐行读取，非序列字符跳过并转小写；
+- 缓冲长度到达 `chunk_size + overlap` 即调度 worker，worker 直接调用 `find_raw_bytes_no_chunking()`；
+- 染色体结束后调用 `finish()` 返回去重后的结果。
 
-3. **Loop Discovery** (`G4Candidate::expand`): 
-   - Determine next cursor position: after tetrad1 (if y1 unset), tetrad2 (if y2 unset), or tetrad3 (if y3 unset).
-   - Call `find_loop_lengths_from(cursor)` to scan forward for matching tetrad runs, collecting all valid loop lengths `y` where:
-     - `y >= min_acceptable_loop_length()` (0 unless another loop is already 0, then 1)
-     - `cursor + y + tetrad_len - 1 < max_length` (candidate stays within length limit)
-   - Clone candidate for each valid `y`, assign to next loop slot, push to queue if `partial_length() <= max_length`.
+## CLI (`src/bin/qgrs.rs`)
+- Inline `--sequence`：调用 `find_owned_bytes_with_limits()`，CSV 默认写 stdout，Parquet 需 `--output`。
+- `--file` + `--mode mmap`：`load_sequences_from_path()` → Rayon 并行 → CSV/Parquet 分染色体写入。
+- `--file` + `--mode stream`：`stream::process_fasta_stream_with_limits()` 回调中写文件。
+- 线程数固定为 `num_cpus::get()`，避免依赖 `RAYON_NUM_THREADS`。
 
-4. **Scoring** (`G4Candidate::score`): Legacy formula `floor(gmax - gavg + gmax*(tetrads-2))` where:
-   - `gmax = max_length - (tetrads*4 + 1)`
-   - `gavg = mean(|y1-y2|, |y2-y3|, |y1-y3|)`
-   - Higher score = more uniform loop distribution within tighter overall structure.
+## `.rs` 文件速查表
+| 文件 | 说明 |
+| --- | --- |
+| `src/lib.rs` | 仅 `pub mod qgrs;`，避免 crate 根 API 泄露。 |
+| `src/qgrs/mod.rs` | 模块入口：声明 `pub mod stream;`，`pub use` 暴露搜索/导出 API。 |
+| `src/qgrs/data.rs` | `InputMode`, `ChromSequence`, `ScanLimits`, `SequenceData`, `SequenceSlice`, `is_g` 等基础数据结构。 |
+| `src/qgrs/search.rs` | BFS 搜索实现：`G4`, `G4Candidate`, `GRunScanner`, `find_raw_*` 等核心算法。 |
+| `src/qgrs/chunks.rs` | `find_owned_bytes*`, chunk/overlap 计算、`find_with_sequence`、`shift_g4`。负责串联 Rayon 与 `consolidate_g4s`。 |
+| `src/qgrs/consolidation.rs` | `consolidate_g4s`, `DedupKey`, overlap 判断、家族 winner 逻辑。 |
+| `src/qgrs/export.rs` | `render_csv_results`, `write_parquet_results`, `ExportError`，包含 CSV 转义与 Arrow/Parquet 写入。 |
+| `src/qgrs/loaders.rs` | `load_sequences_from_path`, `load_sequences_mmap`, `load_sequences_stream`, `parse_chrom_name` 以及内部 push helper。 |
+| `src/qgrs/stream.rs` | Streaming FASTA 处理：`process_fasta_stream(_with_limits)`, `process_reader`, `StreamChromosome`, `StreamChunkScheduler`。 |
+| `src/qgrs/tests/helpers.rs` | 测试辅助（例如 `arc_from_sequence`）。 |
+| `src/qgrs/tests/unit.rs` | 单测：命中检测、CSV/Parquet 输出、loader 行为。 |
+| `src/qgrs/tests/integration_chunk.rs` | Chunk 与非 chunk 结果一致性、边界情况。 |
+| `src/qgrs/tests/integration_stream.rs` | Stream 与 batch 结果等价验证。 |
+| `src/qgrs/tests/mod.rs` | 组织 helper + 子模块。 |
+| `src/bin/qgrs.rs` | 主 CLI，解析参数、调度 `qgrs` 模块并写 CSV/Parquet。 |
+| `src/bin/compare_modes.rs` | 开发用工具：比较 mmap vs stream 的性能与命中差异。 |
+| `src/bin/compare_csv_outputs.rs` | 对比两个输出目录的 CSV 是否逐行一致，打印差异详情。 |
 
-### Family Consolidation (`consolidate_g4s`)
-Merges overlapping G4 candidates into representative families:
+## 关键约定与陷阱
+1. **坐标体系**：内部 0-based 半开区间 `[start,end)`；输出 start+1、end inclusive，CSV/Parquet 必须保持一致。
+2. **排序后合并**：`consolidate_g4s` 在排序后的 raw hits 上工作，确保家族顺序 deterministic。
+3. **Stream worker 禁止再分块**：`StreamChunkScheduler` 已提供 overlap，worker 只能直接跑 `find_raw_bytes_no_chunking()`。
+4. **避免调试输出**：库函数不得打印 stdout；如需调试请加 feature flag 或日志。
+5. **Arc clone 便宜**：`Arc<Vec<u8>>` clone 仅递增引用计数，可在 Rayon worker 中放心复用。
+6. **ChromSequence 访问**：外部如需名字或序列，使用 `chrom.name()` / `chrom.sequence()` / `chrom.into_parts()`。
 
-1. **Deduplication Phase**:
-   ```rust
-   // Input: raw_g4s sorted by start position
-   HashMap<DedupKey, G4>  // Key = (start, end, sequence_bytes)
-   ```
-   - For each candidate, check if key exists: insert if new, replace if `gscore` higher.
-   - Collect HashMap values, sort by `(start, end)` to stabilize iteration order.
-   - **Why**: BFS can generate multiple candidates with same coordinates but different loop configs (e.g., `(5,2,5)` vs `(5,1,6)` at position 212). We keep the best scorer to avoid family merge seeing duplicates.
-
-2. **Family Grouping**:
-   ```rust
-   for g4 in deduped {
-       for family in &mut families {
-           if belongs_in(&g4, family) {  // Overlaps any member?
-               family.push(g4.clone());
-               inserted = true;
-               break;
-           }
-       }
-       if !inserted { families.push(vec![g4]); }
-   }
-   ```
-   - `overlapped(a, b)`: Returns true if intervals `[a.start, a.start+a.length]` and `[b.start, b.start+b.length]` share any base.
-   - Linear scan through families; first match wins (order-dependent, hence dedup sort requirement).
-   - Each family = set of G4s sharing overlapping genomic coordinates.
-
-3. **Winner Selection**:
-   ```rust
-   for family in families {
-       let best = family.iter().max_by_key(|g| g.gscore)?;
-       results.push(best.clone());
-   }
-   ```
-   - Emit single highest-scoring member per family.
-   - **Rationale**: Overlapping structures likely represent same biological feature; choose best-scoring configuration.
-
-### Key Functions
-```rust
-// Public entry points
-find_owned_bytes(Arc<Vec<u8>>, ...) -> Vec<G4>              // Default limits helper
-find_owned_bytes_with_limits(Arc<Vec<u8>>, ...) -> Vec<G4>  // Zero-copy, parallel chunks
-
-// Raw (unconsolidated) helpers
-find_raw_bytes_no_chunking(Vec<u8>, ...) -> Vec<G4>         // Stream workers, window slices
-find_raw_on_window_bytes(Arc<Vec<u8>>, ...) -> Vec<G4>      // Chunked mmap windows
-
-// Internal building blocks
-consolidate_g4s(Vec<G4>) -> Vec<G4>              // Dedup + family merge
-maximum_length(tetrads, limits) -> usize         // 2 tetrads→30bp, 3+→45bp
-```
-
-### Streaming Mode (`src/qgrs/stream.rs`)
-`StreamChromosome` maintains sliding window state, dispatches chunks to Rayon workers, merges results on chromosome boundary. No consolidation per-chunk—raw hits accumulated, then single `consolidate_g4s()` call on finish.
-
-### CLI Orchestration (`src/bin/qgrs.rs`)
-- **Inline sequence**: `--sequence` → normalize to lowercase bytes → `find_owned_bytes_with_limits()`
-- **FASTA file**: 
-  - `mmap` mode: `load_sequences_from_path()` → `Vec<ChromSequence>` → parallel `into_par_iter()` → per-chromosome `find_owned_bytes_with_limits()` → write outputs
-  - `stream` mode: `process_fasta_stream_with_limits()` → callback per chromosome → write outputs
-- **Output formats**: CSV (`render_csv_results`), Parquet (`write_parquet_results`). Both consume `Vec<G4>`.
-
-## Critical Patterns
-
-### Testing Parity
-Test `big_sequence_internal_equals_chunked` ensures chunk/non-chunk paths produce identical results. When modifying `consolidate_g4s()` or overlap logic, this MUST pass.
-
-### Coordinate System
-- **Internal (0-based)**: All search logic uses 0-based half-open `[start, end)`.
-- **Output (1-based)**: `G4::from_candidate()` adds 1 to start; `end` remains exclusive. CSV/Parquet show 1-based inclusive for genome browsers.
-
-### Performance Hotspots
-- `GRunScanner`: Uses `memchr2(b'g', b'G')` for SIMD-friendly seed detection.
-- Rayon parallelism: Chunks processed via `into_par_iter().flat_map_iter()`. Thread count locked to `num_cpus::get()` in `main()`.
-- Avoid per-candidate `String` allocation: `G4.sequence_view` holds slice reference, uppercase conversion deferred to `sequence()` call.
-
-## Common Workflows
-
-### Build & Test
+## 构建、测试与常用脚本
 ```bash
-cargo build --release --bin qgrs        # Optimized binary
-cargo test --lib                        # Unit tests (includes chunk parity)
-cargo test --lib -- --nocapture         # See println! output
+# Release 构建 CLI
+cargo build --release --bin qgrs
+
+# 单元 + 集成测试
+cargo test --lib
+
+# mmap vs stream 性能/一致性
+target/release/compare_modes data.fa 3 20
+
+# CSV 目录对比
+target/release/compare_csv_outputs out_mmap out_stream
 ```
+> `compare_modes` 既汇报性能也会在发现差异时列出前若干条，适合作为轻量基准脚本。
 
-### Adding New Output Format
-1. Extend `OutputFormat` enum in `src/bin/qgrs.rs`
-2. Add renderer in `src/qgrs/mod.rs` (e.g., `render_wig_density(&[G4]) -> String`)
-3. Update both `process_inline_sequence()` and FASTA branches (mmap + stream callback)
-4. Add `extension()` case and CLI `--format` parser
-
-### Debugging Consolidation Issues
-Use `find_raw_bytes_no_chunking()` (for ad-hoc slices) or `find_raw_on_window_bytes()` to collect unconsolidated hits, then print before/after `consolidate_g4s()`. Check `DedupKey` hash collisions and family overlap logic (`overlapped()`, `belongs_in()`).
-
-## Project-Specific Conventions
-
-- **Chinese comments acceptable**: Legacy collaboration used mixed English/Chinese; maintain readability for both.
-- **Lowercase storage, uppercase output**: Never store uppercase sequences in `SequenceData` or `SequenceSlice`. Always normalize to lowercase on ingestion.
-- **Legacy scoring preserved**: `G4Candidate::score()` math must match C++ original (`qgrs.h` reference). Formula: `floor(gmax - gavg + gmax*(tetrads-2))`.
-- **No `pub` leakage**: Internal helpers (`SequenceData`, `GRunScanner`) remain crate-private. Only `find_*`, `render_*`, `write_*`, `ChromSequence`, `ScanLimits` exposed.
-
-## File Organization
-```
-src/
-├── lib.rs              # Re-exports qgrs module
-├── qgrs/
-│   ├── mod.rs          # Core search, consolidation, exporters
-│   └── stream.rs       # Streaming FASTA parser + chunk scheduler
-└── bin/
-    ├── qgrs.rs         # Main CLI
-    ├── compare_modes.rs       # Dev tool: diff mmap vs stream
-    └── compare_csv_outputs.rs # Dev tool: validate output parity
-```
-
-## Avoiding Common Pitfalls
-
-1. **Dedup order matters**: After HashMap-based dedup, MUST `sort_by((start, end))` before family grouping. Otherwise chunk/stream modes diverge due to insertion order variance.
-2. **Don't re-chunk in stream workers**: `find_raw_bytes_no_chunking()` consumes scheduler windows directly to prevent nested chunking.
-3. **Test with `big.txt`**: Reference dataset includes edge cases (overlapping families, 2-tetrad max_length=30). Always validate against legacy `big.csv`.
-4. **Arc cloning is cheap**: `Arc<Vec<u8>>` clones only increment refcount. Safe to pass into Rayon closures without copying sequences.
-
-## Integration Points
-
-- **FASTA loaders**: `load_sequences_mmap()` / `load_sequences_stream()` in `mod.rs`, called by CLI.
-- **Parquet schema**: 9 columns (start, end, length, tetrads, y1-y3, gscore, sequence). Arrow types in `write_parquet_from_results()`.
-- **Stream callback**: `FnMut(String, Vec<G4>) -> io::Result<()>` receives chromosome name + consolidated results.
-
-## When Modifying Core Logic
-
-- Update `maximum_length()` only if validating against updated C++ reference.
-- Changes to `consolidate_g4s()` require re-running full test suite + manual `big.txt` diff.
-- New CLI flags: add to `usage()`, `run_env()` parser, and corresponding struct (`OutputFormat`, etc.).
-- Rayon thread count intentionally fixed; avoid `RAYON_NUM_THREADS` env var to ensure reproducibility.
+## 修改核心逻辑的 Checklist
+- 任何涉及搜索、分块或去重的改动都要跑 `cargo test --lib`，重点关注 `big_sequence_internal_equals_chunked` 和 `stream_pipeline_matches_batch_results`；
+- CLI/输出格式改动：同步更新 README、`--help`，并使用 `compare_csv_outputs`/`compare_modes` 做回归；
+- 新增输出格式：扩展 `OutputFormat`、实现渲染器、更新 CLI 两条路径以及测试；
+- 调整 `ScanLimits`/chunk 行为时记得刷新 README 架构描述并记录默认参数；
+- Rayon 线程数固定在 `main()`，避免依赖环境变量导致不确定行为。

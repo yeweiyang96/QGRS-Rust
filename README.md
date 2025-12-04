@@ -36,6 +36,21 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 - `cargo` is required for building, running, and testing.
 - macOS and Linux are tested; Windows should work via WSL2.
 
+## 🧱 架构
+
+QGRS-Rust 的核心位于 `src/qgrs/`，每个模块对应搜索管线中的独立阶段：
+
+- `data.rs`：定义 `ChromSequence`、`SequenceData`、`ScanLimits` 等零拷贝数据容器。
+- `search.rs`：实现 G-run 扫描、BFS 候选扩展、计分与原始 `G4` 构造。
+- `chunks.rs`：根据 `ScanLimits` 计算窗口与重叠，调度 `find_raw_*` 并合并 Rayon 结果。
+- `consolidation.rs`：对原始命中去重、聚类，保留每个重叠家族的最高 `gscore`。
+- `stream.rs`：实现 `StreamChromosome`/`StreamChunkScheduler`，增量解析超大 FASTA。
+- `loaders.rs`：封装 mmap 与普通文件加载器，供 CLI 在批量模式下复用。
+- `export.rs`：提供 CSV/Parquet 渲染器及错误类型，统一 1-based 坐标输出。
+- `tests/`：集中单元与集成测试，确保 chunk/stream 模式结果一致。
+
+`src/lib.rs` 只负责 re-export 公共 API，`src/bin/qgrs.rs` 将 CLI 选项映射到上述模块，保持入口简洁。
+
 ## ⚙️ Build
 
 ```bash
@@ -43,7 +58,7 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 git clone https://github.com/<your-org>/QGRS-Rust.git
 cd QGRS-Rust
 
-# debug build (fast iteration)
+# dev build (fast iteration)
 cargo build --bin qgrs
 
 # optimized binary for large genomes

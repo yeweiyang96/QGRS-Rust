@@ -11,8 +11,6 @@ use super::{
     find_raw_bytes_no_chunking, parse_chrom_name, shift_g4,
 };
 
-// debug helpers removed
-
 pub fn process_fasta_stream<F>(
     path: &Path,
     min_tetrads: usize,
