@@ -220,8 +220,9 @@ fn process_inline_sequence(
 ) -> Result<(), String> {
     let mut normalized = sequence.into_bytes();
     normalized.make_ascii_lowercase();
-    let results =
+    let raw =
         qgrs::find_owned_bytes_with_limits(Arc::new(normalized), min_tetrads, min_score, limits);
+    let results = qgrs::consolidate_g4s(raw);
     match format {
         OutputFormat::Csv => {
             let csv = qgrs::render_csv_results(&results);
@@ -270,12 +271,14 @@ fn process_fasta_file(
             chrom_outputs.into_par_iter().try_for_each(
                 |(chrom, filepath)| -> Result<(), String> {
                     let (name, sequence) = chrom.into_parts();
-                    let results = qgrs::find_owned_bytes_with_limits(
+                    let raw = qgrs::find_owned_bytes_with_limits(
                         sequence,
                         min_tetrads,
                         min_score,
                         limits,
                     );
+                    println!("chromosome: {}, g4 raw hits: {}", name, raw.len());
+                    let results = qgrs::consolidate_g4s(raw);
                     match format {
                         OutputFormat::Csv => {
                             let csv = qgrs::render_csv_results(&results);

@@ -36,7 +36,7 @@ fn belongs_in(g4: &G4, family: &[G4]) -> bool {
     family.iter().any(|member| overlapped(g4, member))
 }
 
-pub(crate) fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
+pub fn consolidate_g4s(mut raw_g4s: Vec<G4>) -> Vec<G4> {
     raw_g4s.sort_by(|a, b| a.start.cmp(&b.start));
 
     let mut best_by_key: HashMap<DedupKey, G4> = HashMap::new();

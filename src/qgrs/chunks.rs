@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use crate::qgrs::consolidation::consolidate_g4s;
 use crate::qgrs::data::{ScanLimits, SequenceData};
 use crate::qgrs::search::{G4, find_raw_on_window_bytes, find_raw_with_sequence};
 
@@ -52,7 +51,8 @@ pub fn find_owned_bytes_with_limits(
                 hits.into_iter()
             })
             .collect();
-        return consolidate_g4s(merged_raw);
+
+        return merged_raw;
     }
     let seq = Arc::new(SequenceData::from_bytes(sequence));
     find_with_sequence(seq, min_tetrads, min_score, limits)
@@ -82,6 +82,5 @@ pub(crate) fn find_with_sequence(
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
-    let raw = find_raw_with_sequence(seq, min_tetrads, min_score, limits);
-    consolidate_g4s(raw)
+    find_raw_with_sequence(seq, min_tetrads, min_score, limits)
 }

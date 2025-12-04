@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 
 use crate::qgrs::stream;
-use crate::qgrs::{InputMode, find_owned_bytes};
+use crate::qgrs::{InputMode, consolidate_g4s, find_owned_bytes};
 
 #[test]
 fn stream_pipeline_matches_batch_results() {
@@ -12,7 +12,8 @@ fn stream_pipeline_matches_batch_results() {
     let sequences = crate::qgrs::load_sequences_from_path(&path, InputMode::Stream).unwrap();
     let mut expected: HashMap<String, Vec<_>> = HashMap::new();
     for chrom in &sequences {
-        let hits = find_owned_bytes(chrom.sequence(), 2, 17);
+        let raw = find_owned_bytes(chrom.sequence(), 2, 17);
+        let hits = consolidate_g4s(raw);
         expected.insert(chrom.name().to_string(), hits);
     }
     let mut actual: HashMap<String, Vec<_>> = HashMap::new();

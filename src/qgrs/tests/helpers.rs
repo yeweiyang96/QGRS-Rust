@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::qgrs::data::SequenceData;
-use crate::qgrs::{G4, ScanLimits, find_with_sequence};
+use crate::qgrs::{G4, ScanLimits, consolidate_g4s, find_with_sequence};
 
 pub(super) type G4Signature = (usize, usize, usize, usize, i32, i32, i32, i32, String);
 
@@ -45,5 +45,6 @@ pub(super) fn run_internal_scan(
     limits: ScanLimits,
 ) -> Vec<G4> {
     let seq = Arc::new(SequenceData::new(sequence));
-    find_with_sequence(seq, min_tetrads, min_score, limits)
+    let raw = find_with_sequence(seq, min_tetrads, min_score, limits);
+    consolidate_g4s(raw)
 }

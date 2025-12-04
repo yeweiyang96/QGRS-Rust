@@ -7,8 +7,7 @@
             "request": "launch",
             "cargo": {
                 "args": [
-                    "build",
-                    "--release",
+                    "run",
                     "--bin",
                     "qgrs"
                 ]
@@ -18,7 +17,7 @@
                 "${workspaceFolder}/big.txt",
                 "--output-dir",
                 "${workspaceFolder}/output"
-            ],
+            ]
         }
     ]
 }

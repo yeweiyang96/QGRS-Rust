@@ -18,7 +18,7 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 2. `GRunScanner` 使用 `memchr2` 查找 G-run，生成 BFS 种子。
 3. `G4Candidate::expand` 穷举三个 loop 长度（`find_loop_lengths_from`），确保 `partial_length() <= maximum_length()`。
 4. `G4Candidate::score()` 保留与 C++ 一致的 `floor(gmax - gavg + gmax*(tetrads-2))`。
-5. `find_raw_on_window_bytes` / `find_raw_bytes_no_chunking` 生成 raw 命中；`consolidate_g4s` 去重并按染色体家族挑选最高分。
+5. `find_raw_on_window_bytes` / `find_raw_bytes_no_chunking` 生成 raw 命中；`find_owned_bytes*` 仅负责组装这些 raw hits，需由调用方显式传给 `consolidate_g4s` 做去重/家族合并。
 6. 结果通过 `render_csv_results` 或 `write_parquet_results` 输出。
 
 ### 分块策略
@@ -38,7 +38,7 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 - 染色体结束后调用 `finish()` 返回去重后的结果。
 
 ## CLI (`src/bin/qgrs.rs`)
-- Inline `--sequence`：调用 `find_owned_bytes_with_limits()`，CSV 默认写 stdout，Parquet 需 `--output`。
+- Inline `--sequence`：调用 `find_owned_bytes_with_limits()` 获取 raw hits，再交给 `consolidate_g4s()`，CSV 默认写 stdout，Parquet 需 `--output`。
 - `--file` + `--mode mmap`：`load_sequences_from_path()` → Rayon 并行 → CSV/Parquet 分染色体写入。
 - `--file` + `--mode stream`：`stream::process_fasta_stream_with_limits()` 回调中写文件。
 - 线程数固定为 `num_cpus::get()`，避免依赖 `RAYON_NUM_THREADS`。
@@ -50,7 +50,7 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 | `src/qgrs/mod.rs` | 模块入口：声明 `pub mod stream;`，`pub use` 暴露搜索/导出 API。 |
 | `src/qgrs/data.rs` | `InputMode`, `ChromSequence`, `ScanLimits`, `SequenceData`, `SequenceSlice`, `is_g` 等基础数据结构。 |
 | `src/qgrs/search.rs` | BFS 搜索实现：`G4`, `G4Candidate`, `GRunScanner`, `find_raw_*` 等核心算法。 |
-| `src/qgrs/chunks.rs` | `find_owned_bytes*`, chunk/overlap 计算、`find_with_sequence`、`shift_g4`。负责串联 Rayon 与 `consolidate_g4s`。 |
+| `src/qgrs/chunks.rs` | `find_owned_bytes*`, chunk/overlap 计算、`find_with_sequence`、`shift_g4`。负责串联 Rayon 窗口并返回 raw hits（调用者自行 `consolidate_g4s`）。 |
 | `src/qgrs/consolidation.rs` | `consolidate_g4s`, `DedupKey`, overlap 判断、家族 winner 逻辑。 |
 | `src/qgrs/export.rs` | `render_csv_results`, `write_parquet_results`, `ExportError`，包含 CSV 转义与 Arrow/Parquet 写入。 |
 | `src/qgrs/loaders.rs` | `load_sequences_from_path`, `load_sequences_mmap`, `load_sequences_stream`, `parse_chrom_name` 以及内部 push helper。 |
