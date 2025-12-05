@@ -147,21 +147,14 @@ where
     }
 
     let limits = ScanLimits::new(max_g4_length, max_g_run);
+    let scan = ScanConfig::new(min_tetrads, min_score, limits);
 
     match input {
         InputSpec::Inline(seq) => {
             if output_dir.is_some() {
                 return Err(usage("--output-dir can only be used with --file"));
             }
-            process_inline_sequence(
-                seq,
-                format,
-                output_path,
-                min_tetrads,
-                min_score,
-                limits,
-                include_overlap,
-            )?;
+            process_inline_sequence(seq, format, output_path, scan, include_overlap)?;
         }
         InputSpec::File(path) => {
             if output_path.is_some() {
@@ -169,16 +162,7 @@ where
                     "--output is only valid with --sequence; use --output-dir for --file",
                 ));
             }
-            process_fasta_file(
-                path,
-                mode,
-                format,
-                min_tetrads,
-                min_score,
-                limits,
-                output_dir,
-                include_overlap,
-            )?;
+            process_fasta_file(path, mode, format, scan, output_dir, include_overlap)?;
         }
     }
     Ok(())
@@ -226,13 +210,40 @@ enum InputSpec {
     File(PathBuf),
 }
 
+#[derive(Clone, Copy)]
+struct ScanConfig {
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+}
+
+impl ScanConfig {
+    fn new(min_tetrads: usize, min_score: i32, limits: ScanLimits) -> Self {
+        Self {
+            min_tetrads,
+            min_score,
+            limits,
+        }
+    }
+
+    fn min_tetrads(self) -> usize {
+        self.min_tetrads
+    }
+
+    fn min_score(self) -> i32 {
+        self.min_score
+    }
+
+    fn limits(self) -> ScanLimits {
+        self.limits
+    }
+}
+
 fn process_inline_sequence(
     sequence: String,
     format: OutputFormat,
     output_path: Option<PathBuf>,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
+    scan: ScanConfig,
     include_overlap: bool,
 ) -> Result<(), String> {
     let mut normalized = sequence.into_bytes();
@@ -240,8 +251,12 @@ fn process_inline_sequence(
     if include_overlap && output_path.is_none() {
         return Err(usage("--overlap requires --output when using --sequence"));
     }
-    let raw =
-        qgrs::find_owned_bytes_with_limits(Arc::new(normalized), min_tetrads, min_score, limits);
+    let raw = qgrs::find_owned_bytes_with_limits(
+        Arc::new(normalized),
+        scan.min_tetrads(),
+        scan.min_score(),
+        scan.limits(),
+    );
     let (results, family_ranges, raw_hits) = consolidate_for_export(raw, include_overlap);
     match format {
         OutputFormat::Csv => {
@@ -275,9 +290,7 @@ fn process_fasta_file(
     path: PathBuf,
     mode: InputMode,
     format: OutputFormat,
-    min_tetrads: usize,
-    min_score: i32,
-    limits: ScanLimits,
+    scan: ScanConfig,
     output_dir: Option<PathBuf>,
     include_overlap: bool,
 ) -> Result<(), String> {
@@ -301,9 +314,9 @@ fn process_fasta_file(
                     let (name, sequence) = chrom.into_parts();
                     let raw = qgrs::find_owned_bytes_with_limits(
                         sequence,
-                        min_tetrads,
-                        min_score,
-                        limits,
+                        scan.min_tetrads(),
+                        scan.min_score(),
+                        scan.limits(),
                     );
                     let (results, family_ranges, raw_hits) =
                         consolidate_for_export(raw, include_overlap);
@@ -341,9 +354,9 @@ fn process_fasta_file(
             if include_overlap {
                 qgrs::stream::process_fasta_stream_with_limits_overlap(
                     &path,
-                    min_tetrads,
-                    min_score,
-                    limits,
+                    scan.min_tetrads(),
+                    scan.min_score(),
+                    scan.limits(),
                     |name, mut stream_results| {
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
@@ -365,7 +378,7 @@ fn process_fasta_file(
                             .expect("raw hits missing from overlap stream results");
 
                         write_overlap_exports(&filepath, &raw_hits, &stream_results.family_ranges)
-                            .map_err(|err| io::Error::other(err))?;
+                            .map_err(io::Error::other)?;
                         Ok(())
                     },
                 )
@@ -373,9 +386,9 @@ fn process_fasta_file(
             } else {
                 qgrs::stream::process_fasta_stream_with_limits(
                     &path,
-                    min_tetrads,
-                    min_score,
-                    limits,
+                    scan.min_tetrads(),
+                    scan.min_score(),
+                    scan.limits(),
                     |name, results| {
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
@@ -436,10 +449,9 @@ fn sanitize_name(raw: &str) -> String {
     }
 }
 
-fn consolidate_for_export(
-    raw: Vec<G4>,
-    capture_raw: bool,
-) -> (Vec<G4>, Vec<(usize, usize)>, Option<Vec<G4>>) {
+type ConsolidatedResults = (Vec<G4>, Vec<(usize, usize)>, Option<Vec<G4>>);
+
+fn consolidate_for_export(raw: Vec<G4>, capture_raw: bool) -> ConsolidatedResults {
     if capture_raw {
         let raw_copy = raw.clone();
         let (hits, ranges) = qgrs::consolidate_g4s(raw);
