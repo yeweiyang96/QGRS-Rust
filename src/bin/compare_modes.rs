@@ -1,6 +1,7 @@
-use qgrs_rust::InputMode;
-use qgrs_rust::qgrs::stream;
-use qgrs_rust::qgrs::{find_owned, load_sequences_from_path};
+use qgrs_rust::qgrs::{
+    InputMode, ScanLimits, consolidate_g4s, find_owned_bytes_with_limits, load_sequences_from_path,
+    stream,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -52,13 +53,11 @@ fn main() {
 
     let process_start = Instant::now();
     let mut batch_results: HashMap<String, Vec<_>> = HashMap::new();
+    let limits = ScanLimits::default();
     for chrom in &sequences {
-        let hits = find_owned(
-            String::from_utf8_lossy(&chrom.sequence).to_string(),
-            min_tetrads,
-            min_gscore,
-        );
-        batch_results.insert(chrom.name.clone(), hits);
+        let raw = find_owned_bytes_with_limits(chrom.sequence(), min_tetrads, min_gscore, limits);
+        let (hits, _ranges) = consolidate_g4s(raw);
+        batch_results.insert(chrom.name().to_string(), hits);
     }
     let process_time = process_start.elapsed();
     let batch_total_time = start.elapsed();

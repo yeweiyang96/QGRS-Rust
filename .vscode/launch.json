@@ -2,18 +2,60 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug QGRS Rust",
+            "name": "Debug big.txt with mmap",
             "type": "lldb",
             "request": "launch",
-			"cargo": {
-				"args": ["build" ,"--bin", "qgrs" ]
-			},
-            "program": "${workspaceFolder}/target/debug/qgrs",
-            "args": ["--file","${workspaceFolder}/big.txt","--output-dir","${workspaceFolder}/output"],
-            "cwd": "${workspaceFolder}",
-            "stopOnEntry": false,
-            "env": {},
-            "console": "integratedTerminal"
-        }
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin",
+                    "qgrs"
+                ]
+            },
+            "args": [
+                "--file",
+                "${workspaceFolder}/big.txt",
+                "--output-dir",
+                "${workspaceFolder}/output"
+            ]
+        },
+        {
+            "name": "Debug big.txt with stream",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin",
+                    "qgrs"
+                ]
+            },
+            "args": [
+                "--file",
+                "${workspaceFolder}/big.txt",
+                "--output-dir",
+                "${workspaceFolder}/output",
+                "--mode",
+                "stream"
+            ]
+        },
+        {
+            "name": "Debug dme.fa with mmap",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin",
+                    "qgrs"
+                ]
+            },
+            "args": [
+                "--file",
+                "${workspaceFolder}/dme.fa",
+                "--output-dir",
+                "${workspaceFolder}/output/dme"
+            ]
+        },
     ]
 }

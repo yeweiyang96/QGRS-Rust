@@ -29,12 +29,28 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 - Memory-mapped (`mmap`) and streaming (`stream`) readers let you pick the best strategy per dataset.
 - CSV/Parquet exporters always report 1-based, inclusive coordinates for genome-browser compatibility.
 - CLI validation enforces sane tetrad, loop, and window settings to avoid silent misconfiguration.
+- Optional `--overlap` flag writes both the sorted raw hits and post-consolidation family ranges alongside your primary export for diffing and debugging.
 
 ## 🧰 Requirements
 
 - Rust toolchain 1.75 or newer (install via [`rustup`](https://rustup.rs)).
 - `cargo` is required for building, running, and testing.
 - macOS and Linux are tested; Windows should work via WSL2.
+
+## 🧱 架构
+
+QGRS-Rust 的核心位于 `src/qgrs/`，每个模块对应搜索管线中的独立阶段：
+
+- `data.rs`：定义 `ChromSequence`、`SequenceData`、`ScanLimits` 等零拷贝数据容器。
+- `search.rs`：实现 G-run 扫描、BFS 候选扩展、计分与原始 `G4` 构造。
+- `chunks.rs`：根据 `ScanLimits` 计算窗口与重叠，调度 `find_raw_*` 并合并 Rayon 结果。
+- `consolidation.rs`：对原始命中去重、聚类，保留每个重叠家族的最高 `gscore`。
+- `stream.rs`：实现 `StreamChromosome`/`StreamChunkScheduler`，增量解析超大 FASTA。
+- `loaders.rs`：封装 mmap 与普通文件加载器，供 CLI 在批量模式下复用。
+- `export.rs`：提供 CSV/Parquet 渲染器及错误类型，统一 1-based 坐标输出。
+- `tests/`：集中单元与集成测试，确保 chunk/stream 模式结果一致。
+
+`src/lib.rs` 只负责 re-export 公共 API，`src/bin/qgrs.rs` 将 CLI 选项映射到上述模块，保持入口简洁。
 
 ## ⚙️ Build
 
@@ -43,7 +59,7 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 git clone https://github.com/<your-org>/QGRS-Rust.git
 cd QGRS-Rust
 
-# debug build (fast iteration)
+# dev build (fast iteration)
 cargo build --bin qgrs
 
 # optimized binary for large genomes
@@ -72,6 +88,7 @@ Options:
    --output <PATH>        Destination file when using --sequence (required for parquet)
    --output-dir <DIR>     Directory for per-chromosome exports when using --file
    --mode <mmap|stream>   Input mode when using --file (default mmap)
+   --overlap              Also emit raw hits (.overlap.csv) + family ranges (.family.csv)
    --help                 Show this message
 ```
 
@@ -109,6 +126,13 @@ target/release/qgrs \
    --max-g-run 8 \
    --max-g4-length 45 \
    --output -
+
+# 5. Keep raw hits and family ranges for post-processing
+target/release/qgrs \
+   --file data/genome.fa \
+   --mode stream \
+   --output-dir ./qgrs_debug \
+   --overlap
 ```
 
 ### CLI reference
@@ -125,6 +149,7 @@ target/release/qgrs \
 | `--format <csv\|parquet>` | Output encoding. CSV defaults to stdout for inline sequences; Parquet requires a file/dir. | `csv`                    |
 | `--output <FILE\|- >`     | Single output file (or `-` for stdout) when scanning inline sequences.                     | stdout for CSV           |
 | `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
+| `--overlap`               | Emit `{base}.overlap.csv` (raw hits) and `{base}.family.csv` (family ranges) per output file. | off                      |
 
 The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet.
 
@@ -143,6 +168,15 @@ Both exporters emit the same fields (see `render_csv` and `write_parquet_from_re
 | `sequence`       | Exact G4 motif sequence extracted from the input.                                       |
 
 CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences).
+
+### Overlap exports (`--overlap`)
+
+Pass `--overlap` to retain additional debugging artifacts for every output file:
+
+- **Raw hits**: `{base}.overlap.csv` mirrors the primary CSV schema but contains the full pre-consolidation hit list. This lets you diff against other implementations or inspect families before winners are picked.
+- **Family ranges**: `{base}.family.csv` lists `family_index,start,end` for each consolidated family, using the same 1-based inclusive coordinates. The index column reflects the order in which families were discovered.
+
+For inline scans you must also supply `--output`, because the overlap files reuse that base path. When scanning FASTA files, each chromosome inherits the sanitized filename that would have been written normally (e.g., `chr2.csv` → `chr2.csv.overlap.csv`). In streaming mode the extra files are flushed as soon as each chromosome finishes, so the memory footprint stays bounded even for gigantic inputs.
 
 ## Testing & QA
 
