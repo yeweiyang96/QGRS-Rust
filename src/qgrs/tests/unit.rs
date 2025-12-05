@@ -12,7 +12,7 @@ use super::helpers::arc_from_sequence;
 fn finds_single_g4() {
     let sequence = "GGGGAGGGGAGGGGAGGGG";
     let raw = find_owned_bytes(arc_from_sequence(sequence), 4, 17);
-    let results = consolidate_g4s(raw);
+    let (results, _ranges) = consolidate_g4s(raw);
     assert_eq!(results.len(), 1);
     let g = &results[0];
     assert_eq!(g.start, 1);
@@ -26,7 +26,7 @@ fn finds_single_g4() {
 #[test]
 fn empty_sequence_has_no_hits() {
     let raw = find_owned_bytes(arc_from_sequence("ACACAC"), 4, 17);
-    let results = consolidate_g4s(raw);
+    let (results, _ranges) = consolidate_g4s(raw);
     assert!(results.is_empty());
 }
 
@@ -34,7 +34,7 @@ fn empty_sequence_has_no_hits() {
 fn csv_output_includes_header_and_rows() {
     let sequence = "GGGGAGGGGAGGGGAGGGG";
     let raw = find_owned_bytes(arc_from_sequence(sequence), 4, 17);
-    let results = consolidate_g4s(raw);
+    let (results, _ranges) = consolidate_g4s(raw);
     let csv = render_csv_results(&results);
     assert!(csv.starts_with("start,end,length"));
     assert!(csv.contains("GGGGAGGGGAGGGGAGGGG"));
@@ -46,7 +46,7 @@ fn parquet_writer_emits_bytes() {
     let path = env::temp_dir().join("qgrs_parquet_test.parquet");
     let file = fs::File::create(&path).expect("temp parquet file");
     let raw = find_owned_bytes(arc_from_sequence(sequence), 4, 17);
-    let results = consolidate_g4s(raw);
+    let (results, _ranges) = consolidate_g4s(raw);
     write_parquet_results(&results, file).expect("parquet export");
     let metadata = fs::metadata(&path).expect("metadata");
     assert!(metadata.len() > 0);

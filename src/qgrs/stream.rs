@@ -247,6 +247,7 @@ impl StreamChunkScheduler {
             }
         }
         combined.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
-        consolidate_g4s(combined)
+        let (hits, _family_ranges) = consolidate_g4s(combined);
+        hits
     }
 }

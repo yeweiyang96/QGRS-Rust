@@ -17,7 +17,7 @@ fn chunked_search_matches_internal_results() {
     sequence.push_str(&"T".repeat(10));
 
     let chunked_raw = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
-    let chunked = consolidate_g4s(chunked_raw);
+    let (chunked, _ranges) = consolidate_g4s(chunked_raw);
 
     let starts: Vec<_> = chunked.iter().map(|g| g.start).collect();
     assert_eq!(starts.len(), 2);
@@ -38,7 +38,7 @@ fn chunked_bytes_matches_full_scan_on_boundary() {
     sequence.push_str(&"T".repeat(32));
 
     let chunked_raw = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
-    let chunked = consolidate_g4s(chunked_raw);
+    let (chunked, _ranges) = consolidate_g4s(chunked_raw);
     let reference = run_internal_scan(&sequence, 4, 17, limits);
 
     assert_eq!(g4_signatures(&chunked), g4_signatures(&reference));
@@ -56,7 +56,7 @@ fn chunked_bytes_handles_adjacent_cross_boundary_families() {
     sequence.push_str(&"C".repeat(24));
 
     let chunked_raw = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 4, 17, limits);
-    let chunked = consolidate_g4s(chunked_raw);
+    let (chunked, _ranges) = consolidate_g4s(chunked_raw);
     let reference = run_internal_scan(&sequence, 4, 17, limits);
 
     assert_eq!(g4_signatures(&chunked), g4_signatures(&reference));
@@ -67,7 +67,7 @@ fn big_sequence_internal_equals_chunked() {
     let sequence = load_big_sequence();
     let limits = ScanLimits::default();
     let chunked_raw = find_owned_bytes_with_limits(arc_from_sequence(&sequence), 2, 17, limits);
-    let chunked = consolidate_g4s(chunked_raw);
+    let (chunked, _ranges) = consolidate_g4s(chunked_raw);
     let internal = run_internal_scan(&sequence, 2, 17, limits);
     assert_eq!(g4_signatures(&chunked), g4_signatures(&internal));
 }

@@ -46,5 +46,6 @@ pub(super) fn run_internal_scan(
 ) -> Vec<G4> {
     let seq = Arc::new(SequenceData::new(sequence));
     let raw = find_with_sequence(seq, min_tetrads, min_score, limits);
-    consolidate_g4s(raw)
+    let (hits, _ranges) = consolidate_g4s(raw);
+    hits
 }

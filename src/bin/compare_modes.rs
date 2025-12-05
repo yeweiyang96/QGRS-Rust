@@ -1,6 +1,6 @@
 use qgrs_rust::qgrs::{
-    self, InputMode, ScanLimits, consolidate_g4s, find_owned_bytes_with_limits,
-    load_sequences_from_path, stream,
+    InputMode, ScanLimits, consolidate_g4s, find_owned_bytes_with_limits, load_sequences_from_path,
+    stream,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -56,7 +56,7 @@ fn main() {
     let limits = ScanLimits::default();
     for chrom in &sequences {
         let raw = find_owned_bytes_with_limits(chrom.sequence(), min_tetrads, min_gscore, limits);
-        let hits = consolidate_g4s(raw);
+        let (hits, _ranges) = consolidate_g4s(raw);
         batch_results.insert(chrom.name().to_string(), hits);
     }
     let process_time = process_start.elapsed();

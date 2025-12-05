@@ -2,12 +2,12 @@ use crate::qgrs::search::G4;
 
 fn is_better_candidate(current: &G4, candidate: &G4) -> bool {
     candidate.gscore > current.gscore
-    // || (candidate.gscore == current.gscore && candidate.length < current.length)
+        || (candidate.gscore == current.gscore && candidate.length < current.length)
 }
 
-pub fn consolidate_g4s(raw_g4s: Vec<G4>) -> Vec<G4> {
+pub fn consolidate_g4s(raw_g4s: Vec<G4>) -> (Vec<G4>, Vec<(usize, usize)>) {
     if raw_g4s.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     debug_assert!(
@@ -18,8 +18,10 @@ pub fn consolidate_g4s(raw_g4s: Vec<G4>) -> Vec<G4> {
     );
 
     let mut consolidated = Vec::with_capacity(raw_g4s.len());
+    let mut family_ranges: Vec<(usize, usize)> = Vec::new();
     let mut iter = raw_g4s.into_iter();
     let mut current_best = iter.next().expect("iterator is non-empty");
+    let mut family_start = current_best.start;
     let mut family_end = current_best.end;
 
     for candidate in iter {
@@ -29,12 +31,15 @@ pub fn consolidate_g4s(raw_g4s: Vec<G4>) -> Vec<G4> {
                 current_best = candidate;
             }
         } else {
+            family_ranges.push((family_start, family_end));
             consolidated.push(current_best);
             current_best = candidate;
+            family_start = current_best.start;
             family_end = current_best.end;
         }
     }
 
+    family_ranges.push((family_start, family_end));
     consolidated.push(current_best);
-    consolidated
+    (consolidated, family_ranges)
 }

@@ -275,16 +275,14 @@ pub(crate) struct GRunScanner<'a> {
     data: &'a [u8],
     cursor: usize,
     min_tetrads: usize,
-    max_g_run: usize,
 }
 
 impl<'a> GRunScanner<'a> {
-    pub(crate) fn new(data: &'a [u8], min_tetrads: usize, max_g_run: usize) -> Self {
+    pub(crate) fn new(data: &'a [u8], min_tetrads: usize) -> Self {
         Self {
             data,
             cursor: 0,
             min_tetrads,
-            max_g_run,
         }
     }
 }
@@ -304,7 +302,7 @@ impl<'a> Iterator for GRunScanner<'a> {
             }
             self.cursor = if run_end < len { run_end + 1 } else { len };
             let run_len = run_end - run_start;
-            if run_len >= self.min_tetrads && run_len <= self.max_g_run {
+            if run_len >= self.min_tetrads {
                 return Some((run_start, run_len));
             }
         }
@@ -348,18 +346,18 @@ pub(crate) fn find_raw_on_window_bytes(
         max_tetrads_allowed = max_tetrads_allowed.min(limits.max_g4_length / 4);
     }
     if max_tetrads_allowed >= min_tetrads {
-        for (run_start_rel, run_len) in GRunScanner::new(window, min_tetrads, limits.max_g_run) {
+        for (run_start_rel, run_len) in GRunScanner::new(window, min_tetrads) {
             let run_start = base_offset + run_start_rel;
             if run_start >= primary_end {
                 continue;
             }
-            let capped_run_len = run_len.min(max_tetrads_allowed);
+            let max_tetrads_for_run = run_len.min(max_tetrads_allowed);
             let mut tetrads = min_tetrads;
-            while tetrads <= capped_run_len {
+            while tetrads <= max_tetrads_for_run {
                 if tetrads * 4 > limits.max_g4_length {
                     break;
                 }
-                let base_max_offset = capped_run_len - tetrads;
+                let base_max_offset = run_len.saturating_sub(tetrads);
                 // Ensure each raw hit is emitted by at most one window by
                 // clamping offsets to the primary section of the chunk.
                 let boundary_offset = primary_end.saturating_sub(run_start + 1);
@@ -428,14 +426,14 @@ fn seed_queue(
     if max_tetrads_allowed < min_tetrads {
         return;
     }
-    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads, limits.max_g_run) {
-        let capped_run_len = run_len.min(max_tetrads_allowed);
+    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads) {
+        let max_tetrads_for_run = run_len.min(max_tetrads_allowed);
         let mut tetrads = min_tetrads;
-        while tetrads <= capped_run_len {
+        while tetrads <= max_tetrads_for_run {
             if tetrads * 4 > limits.max_g4_length {
                 break;
             }
-            let max_offset = capped_run_len - tetrads;
+            let max_offset = run_len.saturating_sub(tetrads);
             for offset in 0..=max_offset {
                 let start = run_start + offset;
                 cands.push_back(G4Candidate::new(seq.clone(), tetrads, start, limits));

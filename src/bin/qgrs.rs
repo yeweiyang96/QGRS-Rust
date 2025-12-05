@@ -222,7 +222,7 @@ fn process_inline_sequence(
     normalized.make_ascii_lowercase();
     let raw =
         qgrs::find_owned_bytes_with_limits(Arc::new(normalized), min_tetrads, min_score, limits);
-    let results = qgrs::consolidate_g4s(raw);
+    let (results, _family_ranges) = qgrs::consolidate_g4s(raw);
     match format {
         OutputFormat::Csv => {
             let csv = qgrs::render_csv_results(&results);
@@ -277,13 +277,13 @@ fn process_fasta_file(
                         min_score,
                         limits,
                     );
-                    println!("chromosome: {}, g4 raw hits: {}", name, raw.len());
-                    let results = qgrs::consolidate_g4s(raw);
-                    println!(
-                        "chromosome: {}, g4 consolidated hits: {}",
-                        name,
-                        results.len()
-                    );
+                    // println!("chromosome: {}, g4 raw hits: {}", name, raw.len());
+                    let (results, _family_ranges) = qgrs::consolidate_g4s(raw);
+                    // println!(
+                    //     "chromosome: {}, g4 consolidated hits: {}",
+                    //     name,
+                    //     results.len()
+                    // );
                     match format {
                         OutputFormat::Csv => {
                             let csv = qgrs::render_csv_results(&results);
