@@ -4,35 +4,54 @@ BFS（广度优先搜索）候选扩展是 QGRS-Rust 核心搜索逻辑，用于
 
 ### 1.1 种子生成（seed_queue）
 
-**目标**：扫描序列识别所有潜在的 G-run（连续 G 碱基），为每个符合条件的 run 在所有有效偏移处生成初始候选。
+**目标**：扫描序列识别所有潜在的 G-run（连续 G 碱基），并在「允许的 tetrad 数量 × 允许的偏移」笛卡尔积上生成初始候选。所有后续 BFS 扩展都建立在这些种子之上。
 
 **实现细节**：
 ```rust
-// 使用 SIMD 加速的 GRunScanner 查找 G-run
-let scanner = GRunScanner::new(&sequence_bytes);
-for run in scanner {
-    let run_length = run.end - run.start;
-    if run_length >= min_tetrads && run_length <= max_g_run {
-        // 为 run 内每个有效偏移生成候选
-        for offset in 0..=(run_length - min_tetrads) {
-            let tetrad_len = min_tetrads + offset_within_run;
-            let cand = G4Candidate::new(run.start + offset, tetrad_len);
-            seed_queue.push_back(cand);
+fn seed_queue(
+    cands: &mut VecDeque<G4Candidate>,
+    seq: Arc<SequenceData>,
+    min_tetrads: usize,
+    limits: ScanLimits,
+) {
+    // 限制 tetrad 数，避免生成超过 max_g_run 或 max_g4_length/4 的种子
+    let mut max_tetrads_allowed = limits.max_g_run;
+    if limits.max_g4_length >= 4 {
+        max_tetrads_allowed = max_tetrads_allowed.min(limits.max_g4_length / 4);
+    }
+    if max_tetrads_allowed < min_tetrads {
+        return;
+    }
+
+    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads) {
+        let max_tetrads_for_run = run_len.min(max_tetrads_allowed);
+        let mut tetrads = min_tetrads;
+        while tetrads <= max_tetrads_for_run {
+            if tetrads * 4 > limits.max_g4_length {
+                break; // tetrad 自身已超出整体长度限制
+            }
+            let max_offset = run_len.saturating_sub(tetrads);
+            for offset in 0..=max_offset {
+                let start = run_start + offset;
+                cands.push_back(G4Candidate::new(seq.clone(), tetrads, start, limits));
+            }
+            tetrads += 1;
         }
     }
 }
 ```
 
-**关键优化**：`GRunScanner` 基于 `memchr2(b'g', b'G')` SIMD 指令，单次扫描识别所有 G 位置，比逐字节检查快约 10 倍。
+**关键优化**：
+- `GRunScanner::new(&seq.normalized, min_tetrads)` 仍基于 `memchr2(b'g', b'G')`，但现在仅返回长度≥`min_tetrads` 的 run，减少了上层过滤成本；SIMD 扫描相较逐字节检查快约 10×。
+- `max_tetrads_allowed = min(max_g_run, max_g4_length/4)` 把 G-run 长度与整体长度约束结合起来，防止生成无法通过后续 `max_length` 检查的冗余种子。
+- 当 run 长度超过 `max_g_run` 时，`run_len.min(max_tetrads_allowed)` 会截断可用 tetrad 数，但随后的偏移枚举依旧覆盖整段 G-run，使得“大于最大连续 G 限制”的长 run 只会以受限窗口形式进入 BFS，而不会完全丢失。
+- 对每个 run，在有效 tetrad 数范围内再枚举所有偏移，确保诸如 `GGGGG` 这类长 run 会覆盖所有子区间，而不用多次扫描序列。
 
-**示例**：
-- 序列片段：`GGGGG...` (5 个连续 G)
-- 参数：`min_tetrads=2`, `max_g_run=5`
-- 生成候选：
-  - offset=0 → tetrad_len=2 (使用前 2 个 G)
-  - offset=1 → tetrad_len=3 (使用前 3 个 G)
-  - offset=2 → tetrad_len=4 (使用前 4 个 G)
-  - offset=3 → tetrad_len=5 (使用全部 5 个 G)
+**示例**（`min_tetrads=2`, `max_g_run=5`, `max_g4_length=40`）：
+- 序列片段：`GGGGG...`（run_len=5）
+- 有效 tetrad 数：2、3、4、5（受 `max_g4_length` 约束，4×5=20 ≤ 40）
+- 对于 tetrad=3，允许的偏移为 `0..=2`，因此会生成 3 个起点：`start`, `start+1`, `start+2`
+- chunk 模式额外在窗口层面限制 `start < primary_end`，以避免窗口重叠区重复发射 raw hit，但 `seed_queue` 本身保持与 stream/inline 路径一致
 
 ### 1.2 广度优先循环（find_raw_with_sequence）
 
