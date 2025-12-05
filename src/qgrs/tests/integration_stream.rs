@@ -51,12 +51,14 @@ fn stream_overlap_exposes_metadata() {
         |name, results| {
             assert_eq!(name, "chr1");
             assert!(!results.hits.is_empty());
-            assert!(results
-                .raw_hits
-                .as_ref()
-                .expect("overlap results missing raw hits")
-                .len()
-                >= results.hits.len());
+            assert!(
+                results
+                    .raw_hits
+                    .as_ref()
+                    .expect("overlap results missing raw hits")
+                    .len()
+                    >= results.hits.len()
+            );
             assert_eq!(results.family_ranges.len(), results.hits.len());
             observed.push(results.hits.len());
             Ok(())

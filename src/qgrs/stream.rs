@@ -287,6 +287,8 @@ struct StreamChunkScheduler {
     inflight: usize,
 }
 
+type FinishParts = (Vec<G4>, Vec<(usize, usize)>, Option<Vec<G4>>);
+
 impl StreamChunkScheduler {
     fn new(min_tetrads: usize, min_score: i32, limits: ScanLimits) -> Self {
         let (tx, rx) = mpsc::channel();
@@ -380,10 +382,7 @@ impl StreamChunkScheduler {
         )
     }
 
-    fn finish_internal(
-        mut self,
-        capture_raw: bool,
-    ) -> (Vec<G4>, Vec<(usize, usize)>, Option<Vec<G4>>) {
+    fn finish_internal(mut self, capture_raw: bool) -> FinishParts {
         self.flush_ready_chunks(true);
         drop(self.tx);
         let mut combined = Vec::new();
