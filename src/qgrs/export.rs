@@ -9,6 +9,14 @@ use parquet::errors::ParquetError;
 
 use crate::qgrs::search::G4;
 
+pub fn render_family_ranges_csv(ranges: &[(usize, usize)]) -> String {
+    let mut out = String::from("family_index,start,end\n");
+    for (index, (start, end)) in ranges.iter().enumerate() {
+        out.push_str(&format!("{},{},{}\n", index + 1, start, end));
+    }
+    out
+}
+
 pub fn render_csv_results(g4s: &[G4]) -> String {
     render_csv(g4s)
 }

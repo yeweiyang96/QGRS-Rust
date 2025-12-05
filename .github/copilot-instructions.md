@@ -7,6 +7,7 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 - 完整零拷贝：内部统一小写 `Arc<Vec<u8>>`，输出时再 uppercase；
 - BFS 扩展 + 去重/家族合并，确保 chunk 与 stream 完全一致；
 - CLI 支持 inline 序列、批量 FASTA、CSV/Parquet 导出，并附带差异/基准工具。
+- 可选 `--overlap` 会额外导出 raw hits (`.overlap.csv`) 与家族范围 (`.family.csv`)，用于结果对比或调试。
 
 ## 模块与 API 边界
 - `src/lib.rs` 只暴露 `pub mod qgrs;`，crate 根不再 re-export 任何函数。
@@ -35,12 +36,14 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 - FASTA 逐行读取，非序列字符跳过并转小写；
 - 缓冲长度到达 `chunk_size + overlap` 即调度 worker，worker 直接调用 `find_raw_bytes_no_chunking()`；
 - 染色体结束后调用 `finish()` 返回去重后的结果。
+- `process_fasta_stream_with_limits_overlap` 返回 `StreamChromosomeResults { hits, family_ranges, raw_hits }`，只有在 CLI 启用 `--overlap` 时才 clone raw hits。
 
 ## CLI (`src/bin/qgrs.rs`)
 - Inline `--sequence`：调用 `find_owned_bytes_with_limits()` 获取 raw hits，再交给 `consolidate_g4s()`，CSV 默认写 stdout，Parquet 需 `--output`。
 - `--file` + `--mode mmap`：`load_sequences_from_path()` → Rayon 并行 → CSV/Parquet 分染色体写入。
 - `--file` + `--mode stream`：`stream::process_fasta_stream_with_limits()` 回调中写文件。
 - 线程数固定为 `num_cpus::get()`，避免依赖 `RAYON_NUM_THREADS`。
+- `--overlap`：inline 模式必须搭配 `--output`，批量/stream 模式会针对每条染色体生成 `{base}.overlap.csv` 与 `{base}.family.csv`，文件名继承主输出追加后缀。
 
 ## `.rs` 文件速查表
 | 文件 | 说明 |
@@ -51,7 +54,7 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 | `src/qgrs/search.rs` | BFS 搜索实现：`G4`, `G4Candidate`, `GRunScanner`, `find_raw_*` 等核心算法。 |
 | `src/qgrs/chunks.rs` | `find_owned_bytes*`, chunk/overlap 计算、`find_with_sequence`、`shift_g4`。负责串联 Rayon 窗口并返回 raw hits（调用者自行 `consolidate_g4s`）。 |
 | `src/qgrs/consolidation.rs` | `consolidate_g4s`, `DedupKey`, overlap 判断、家族 winner 逻辑。 |
-| `src/qgrs/export.rs` | `render_csv_results`, `write_parquet_results`, `ExportError`，包含 CSV 转义与 Arrow/Parquet 写入。 |
+| `src/qgrs/export.rs` | `render_csv_results`, `render_family_ranges_csv`, `write_parquet_results`, `ExportError`，包含 CSV 转义与 Arrow/Parquet 写入。 |
 | `src/qgrs/loaders.rs` | `load_sequences_from_path`, `load_sequences_mmap`, `load_sequences_stream`, `parse_chrom_name` 以及内部 push helper。 |
 | `src/qgrs/stream.rs` | Streaming FASTA 处理：`process_fasta_stream(_with_limits)`, `process_reader`, `StreamChromosome`, `StreamChunkScheduler`。 |
 | `src/qgrs/tests/helpers.rs` | 测试辅助（例如 `arc_from_sequence`）。 |
@@ -70,6 +73,7 @@ QGRS-Rust 是 freezer333/qgrs-cpp 的 Rust 版本，通过原始的 G-score 公�
 4. **避免调试输出**：库函数不得打印 stdout；如需调试请加 feature flag 或日志。
 5. **Arc clone 便宜**：`Arc<Vec<u8>>` clone 仅递增引用计数，可在 Rayon worker 中放心复用。
 6. **ChromSequence 访问**：外部如需名字或序列，使用 `chrom.name()` / `chrom.sequence()` / `chrom.into_parts()`。
+7. **Overlap 输出**：只有在 CLI 启用 `--overlap` 时才 clone raw hits/写额外 CSV，保持默认路径性能。
 
 ## 构建、测试与常用脚本
 ```bash

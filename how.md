@@ -341,3 +341,28 @@ for g4 in deduped.into_iter() {
 ### 阶段3 - 择优：
 每个家族选最高 gscore 成员输出
 生物学原理：重叠结构可能代表同一特征，选最佳配置
+
+### 2.1 元数据导出与 `--overlap`
+
+`consolidate_g4s` 现在同时返回 `(Vec<G4>, Vec<(usize, usize)>)`：第一项是家族优胜者，第二项记录每个家族的 `[start,end]` 范围。CLI 的 `--overlap` 标志会在写入主 CSV/Parquet 的同时追加两类调试文件：
+
+1. `{base}.overlap.csv`：使用 `render_csv_results` 直接 dump 排序后的 raw hits；字段与主 CSV 完全一致，方便做 diff。
+2. `{base}.family.csv`：通过 `render_family_ranges_csv` 输出 `family_index,start,end`，可迅速定位哪些家族被合并。
+
+流式管线通过 `StreamChromosomeResults` 把 `hits`、`family_ranges` 以及可选的 `raw_hits` 传给回调：
+
+```rust
+pub struct StreamChromosomeResults {
+    pub hits: Vec<G4>,
+    pub family_ranges: Vec<(usize, usize)>,
+    pub raw_hits: Option<Vec<G4>>, // 仅在 --overlap 时填充
+}
+```
+
+`--overlap` 默认为关闭，以避免无谓的 `Vec` clone。当用户启用该选项：
+
+- inline 模式必须提供 `--output`，否则无法推导出调试文件的基名；
+- FASTA/mmap 模式为每条染色体写三份文件（主输出 + `.overlap.csv` + `.family.csv`），所有文件都沿用 `sanitize_name`/去重后缀；
+- stream 模式在每个染色体完成时即时 flush 附加 CSV，确保内存占用不会随输入规模增长。
+
+这一机制让你在排查 chunk vs stream 或 Rust vs C++ 差异时，可以直接 diff raw hits 或家族范围，而无需修改核心算法。

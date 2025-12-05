@@ -29,6 +29,7 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 - Memory-mapped (`mmap`) and streaming (`stream`) readers let you pick the best strategy per dataset.
 - CSV/Parquet exporters always report 1-based, inclusive coordinates for genome-browser compatibility.
 - CLI validation enforces sane tetrad, loop, and window settings to avoid silent misconfiguration.
+- Optional `--overlap` flag writes both the sorted raw hits and post-consolidation family ranges alongside your primary export for diffing and debugging.
 
 ## 🧰 Requirements
 
@@ -87,6 +88,7 @@ Options:
    --output <PATH>        Destination file when using --sequence (required for parquet)
    --output-dir <DIR>     Directory for per-chromosome exports when using --file
    --mode <mmap|stream>   Input mode when using --file (default mmap)
+   --overlap              Also emit raw hits (.overlap.csv) + family ranges (.family.csv)
    --help                 Show this message
 ```
 
@@ -124,6 +126,13 @@ target/release/qgrs \
    --max-g-run 8 \
    --max-g4-length 45 \
    --output -
+
+# 5. Keep raw hits and family ranges for post-processing
+target/release/qgrs \
+   --file data/genome.fa \
+   --mode stream \
+   --output-dir ./qgrs_debug \
+   --overlap
 ```
 
 ### CLI reference
@@ -140,6 +149,7 @@ target/release/qgrs \
 | `--format <csv\|parquet>` | Output encoding. CSV defaults to stdout for inline sequences; Parquet requires a file/dir. | `csv`                    |
 | `--output <FILE\|- >`     | Single output file (or `-` for stdout) when scanning inline sequences.                     | stdout for CSV           |
 | `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
+| `--overlap`               | Emit `{base}.overlap.csv` (raw hits) and `{base}.family.csv` (family ranges) per output file. | off                      |
 
 The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet.
 
@@ -158,6 +168,15 @@ Both exporters emit the same fields (see `render_csv` and `write_parquet_from_re
 | `sequence`       | Exact G4 motif sequence extracted from the input.                                       |
 
 CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences).
+
+### Overlap exports (`--overlap`)
+
+Pass `--overlap` to retain additional debugging artifacts for every output file:
+
+- **Raw hits**: `{base}.overlap.csv` mirrors the primary CSV schema but contains the full pre-consolidation hit list. This lets you diff against other implementations or inspect families before winners are picked.
+- **Family ranges**: `{base}.family.csv` lists `family_index,start,end` for each consolidated family, using the same 1-based inclusive coordinates. The index column reflects the order in which families were discovered.
+
+For inline scans you must also supply `--output`, because the overlap files reuse that base path. When scanning FASTA files, each chromosome inherits the sanitized filename that would have been written normally (e.g., `chr2.csv` → `chr2.csv.overlap.csv`). In streaming mode the extra files are flushed as soon as each chromosome finishes, so the memory footprint stays bounded even for gigantic inputs.
 
 ## Testing & QA
 

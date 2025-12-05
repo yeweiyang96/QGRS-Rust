@@ -11,6 +11,12 @@ use super::{
     find_raw_bytes_no_chunking, parse_chrom_name, shift_g4,
 };
 
+pub struct StreamChromosomeResults {
+    pub hits: Vec<G4>,
+    pub family_ranges: Vec<(usize, usize)>,
+    pub raw_hits: Option<Vec<G4>>,
+}
+
 pub fn process_fasta_stream<F>(
     path: &Path,
     min_tetrads: usize,
@@ -21,6 +27,24 @@ where
     F: FnMut(String, Vec<G4>) -> io::Result<()>,
 {
     process_fasta_stream_with_limits(
+        path,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        on_chromosome,
+    )
+}
+
+pub fn process_fasta_stream_with_overlap<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, StreamChromosomeResults) -> io::Result<()>,
+{
+    process_fasta_stream_with_limits_overlap(
         path,
         min_tetrads,
         min_score,
@@ -44,6 +68,21 @@ where
     process_reader_with_limits(reader, min_tetrads, min_score, limits, &mut on_chromosome)
 }
 
+pub fn process_fasta_stream_with_limits_overlap<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    mut on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, StreamChromosomeResults) -> io::Result<()>,
+{
+    let file = File::open(path)?;
+    let reader = BufReader::with_capacity(1 << 20, file);
+    process_reader_with_limits_overlap(reader, min_tetrads, min_score, limits, &mut on_chromosome)
+}
+
 pub fn process_reader<R, F>(
     reader: R,
     min_tetrads: usize,
@@ -55,6 +94,25 @@ where
     F: FnMut(String, Vec<G4>) -> io::Result<()>,
 {
     process_reader_with_limits(
+        reader,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        on_chromosome,
+    )
+}
+
+pub fn process_reader_with_overlap<R, F>(
+    reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, StreamChromosomeResults) -> io::Result<()>,
+{
+    process_reader_with_limits_overlap(
         reader,
         min_tetrads,
         min_score,
@@ -122,6 +180,65 @@ where
     }
 }
 
+pub fn process_reader_with_limits_overlap<R, F>(
+    mut reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, StreamChromosomeResults) -> io::Result<()>,
+{
+    let mut line = String::new();
+    let mut chrom_index = 0usize;
+    let mut current: Option<StreamChromosome> = None;
+
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.starts_with('>') {
+            if let Some(chrom) = current.take() {
+                let (name, results) = chrom.finish_with_overlap();
+                on_chromosome(name, results)?;
+            }
+            chrom_index += 1;
+            let name = parse_chrom_name(&line, chrom_index);
+            current = Some(StreamChromosome::new(name, min_tetrads, min_score, limits));
+            continue;
+        }
+        if current.is_none() {
+            chrom_index += 1;
+            let fallback = format!("chromosome_{}", chrom_index);
+            current = Some(StreamChromosome::new(
+                fallback,
+                min_tetrads,
+                min_score,
+                limits,
+            ));
+        }
+        if let Some(chrom) = current.as_mut() {
+            for byte in line.bytes() {
+                if byte.is_ascii_whitespace() {
+                    continue;
+                }
+                chrom.push_byte(byte.to_ascii_lowercase());
+            }
+        }
+    }
+
+    if let Some(chrom) = current {
+        let (name, results) = chrom.finish_with_overlap();
+        on_chromosome(name, results)?;
+        Ok(chrom_index.max(1))
+    } else {
+        Ok(0)
+    }
+}
+
 struct StreamChromosome {
     name: String,
     scheduler: StreamChunkScheduler,
@@ -142,6 +259,18 @@ impl StreamChromosome {
     fn finish(self) -> (String, Vec<G4>) {
         let results = self.scheduler.finish();
         (self.name, results)
+    }
+
+    fn finish_with_overlap(self) -> (String, StreamChromosomeResults) {
+        let (hits, ranges, raw_hits) = self.scheduler.finish_with_overlap();
+        (
+            self.name,
+            StreamChromosomeResults {
+                hits,
+                family_ranges: ranges,
+                raw_hits: Some(raw_hits),
+            },
+        )
     }
 }
 
@@ -237,7 +366,24 @@ impl StreamChunkScheduler {
         });
     }
 
-    fn finish(mut self) -> Vec<G4> {
+    fn finish(self) -> Vec<G4> {
+        let (hits, _, _) = self.finish_internal(false);
+        hits
+    }
+
+    fn finish_with_overlap(self) -> (Vec<G4>, Vec<(usize, usize)>, Vec<G4>) {
+        let (hits, ranges, raw) = self.finish_internal(true);
+        (
+            hits,
+            ranges,
+            raw.expect("raw hits must be captured when capture_raw is true"),
+        )
+    }
+
+    fn finish_internal(
+        mut self,
+        capture_raw: bool,
+    ) -> (Vec<G4>, Vec<(usize, usize)>, Option<Vec<G4>>) {
         self.flush_ready_chunks(true);
         drop(self.tx);
         let mut combined = Vec::new();
@@ -247,7 +393,12 @@ impl StreamChunkScheduler {
             }
         }
         combined.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
-        let (hits, _family_ranges) = consolidate_g4s(combined);
-        hits
+        let raw_hits = if capture_raw {
+            Some(combined.clone())
+        } else {
+            None
+        };
+        let (hits, ranges) = consolidate_g4s(combined);
+        (hits, ranges, raw_hits)
     }
 }
