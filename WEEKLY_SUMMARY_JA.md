@@ -79,6 +79,7 @@ target/release/merge_bedgraph output/ --output merged.bedgraph
 - 複数の bedGraph ファイルを自動結合
 - ヘッダー付き出力
 - G4検出結果の視覚化に対応
+- JBrowse 上で overlap の情報を表示して、すべての可能性のある G4 がどこに集まっているか見えるようにしたいです。
 
 ---
 
