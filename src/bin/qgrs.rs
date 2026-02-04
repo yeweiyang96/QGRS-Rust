@@ -423,6 +423,7 @@ fn next_output_filename(
     counts: &mut HashMap<String, usize>,
 ) -> String {
     let sanitized = sanitize_name(name);
+    // 处理同名染色体的重复输出(万一)
     let entry = counts.entry(sanitized.clone()).or_insert(0);
     let suffix = if *entry == 0 {
         String::new()
@@ -434,18 +435,23 @@ fn next_output_filename(
 }
 
 fn sanitize_name(raw: &str) -> String {
-    let mut sanitized = String::new();
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-            sanitized.push(ch);
-        } else {
-            sanitized.push('_');
-        }
-    }
-    if sanitized.is_empty() {
+    // let mut sanitized = String::new();
+    // for ch in raw.chars() {
+    //     if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+    //         sanitized.push(ch);
+    //     } else {
+    //         sanitized.push('_');
+    //     }
+    // }
+    // if sanitized.is_empty() {
+    //     "chromosome".to_string()
+    // } else {
+    //     sanitized
+    // }
+    if raw.is_empty() {
         "chromosome".to_string()
     } else {
-        sanitized
+        raw.to_string()
     }
 }
 
