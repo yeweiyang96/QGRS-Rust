@@ -54,7 +54,8 @@
                 "--file",
                 "${workspaceFolder}/dme.fa",
                 "--output-dir",
-                "${workspaceFolder}/output/dme"
+                "${workspaceFolder}/output/dme",
+                "--overlap"
             ]
         },
     ]

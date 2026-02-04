@@ -494,9 +494,18 @@ fn family_csv_path(base: &Path) -> PathBuf {
 }
 
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut os = path.as_os_str().to_os_string();
-    os.push(suffix);
-    PathBuf::from(os)
+    // let mut os = path.as_os_str().to_os_string();
+    // os.push(suffix);
+    // PathBuf::from(os)
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("chromosome");
+    let mut name = String::from(stem);
+    name.push_str(suffix);
+    parent.join(name)
 }
 
 #[derive(Clone, Copy)]
