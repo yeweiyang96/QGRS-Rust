@@ -2,7 +2,8 @@ use std::env;
 use std::fs;
 
 use crate::qgrs::{
-    InputMode, consolidate_g4s, find_owned_bytes, load_sequences_from_path, render_csv_results,
+    InputMode, ScanLimits, SequenceTopology, consolidate_g4s, consolidate_g4s_with_topology,
+    find_owned_bytes, find_owned_bytes_with_topology, load_sequences_from_path, render_csv_results,
     write_parquet_results,
 };
 
@@ -77,4 +78,51 @@ fn load_sequences_mmap_mode_splits_chromosomes() {
     assert_eq!(seqs[1].name(), "chrX");
     assert_eq!(seqs[1].as_uppercase_string(), "CCCC");
     fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn circular_mode_finds_wraparound_hit_when_linear_does_not() {
+    let sequence = "GAGGGGAGGGGAGGGGGGG";
+    let arc = arc_from_sequence(sequence);
+    let limits = ScanLimits::default();
+
+    let linear_raw =
+        find_owned_bytes_with_topology(arc.clone(), 4, 17, limits, SequenceTopology::Linear);
+    let (linear_hits, _ranges) =
+        consolidate_g4s_with_topology(linear_raw, SequenceTopology::Linear, sequence.len());
+    assert!(linear_hits.is_empty());
+
+    let circular_raw =
+        find_owned_bytes_with_topology(arc, 4, 17, limits, SequenceTopology::Circular);
+    let (circular_hits, family_ranges) =
+        consolidate_g4s_with_topology(circular_raw, SequenceTopology::Circular, sequence.len());
+    assert_eq!(circular_hits.len(), 1);
+    assert_eq!(family_ranges.len(), 1);
+
+    let hit = &circular_hits[0];
+    assert!(hit.start > 1);
+    assert!(hit.end > sequence.len());
+    assert_eq!(hit.sequence(), "GGGGAGGGGAGGGGAGGGG");
+}
+
+#[test]
+fn circular_consolidation_merges_wraparound_family() {
+    let sequence = "GAGGGGAGGGGAGGGGGGG";
+    let limits = ScanLimits::default();
+    let raw = find_owned_bytes_with_topology(
+        arc_from_sequence(sequence),
+        4,
+        17,
+        limits,
+        SequenceTopology::Circular,
+    );
+    assert!(raw.len() > 1);
+    let wrap_count = raw.iter().filter(|g4| g4.end > sequence.len()).count();
+    assert!(wrap_count >= 2);
+
+    let (hits, ranges) =
+        consolidate_g4s_with_topology(raw, SequenceTopology::Circular, sequence.len());
+    assert_eq!(hits.len(), 1);
+    assert_eq!(ranges.len(), 1);
+    assert!(ranges[0].1 > sequence.len());
 }

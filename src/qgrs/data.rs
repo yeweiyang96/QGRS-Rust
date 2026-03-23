@@ -7,6 +7,18 @@ pub enum InputMode {
     Stream,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceTopology {
+    Linear,
+    Circular,
+}
+
+impl SequenceTopology {
+    pub const fn is_circular(self) -> bool {
+        matches!(self, Self::Circular)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChromSequence {
     pub(crate) name: String,

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use crate::qgrs::data::{ScanLimits, SequenceData};
+use crate::qgrs::data::{ScanLimits, SequenceData, SequenceTopology};
 use crate::qgrs::search::{G4, find_raw_on_window_bytes, find_raw_with_sequence};
 
 const WINDOW_MIN_BP: usize = 32;
@@ -10,10 +10,44 @@ const WINDOW_MAX_BP: usize = 64;
 const WINDOW_PADDING_BP: usize = 27;
 
 pub fn find_owned_bytes(sequence: Arc<Vec<u8>>, min_tetrads: usize, min_score: i32) -> Vec<G4> {
-    find_owned_bytes_with_limits(sequence, min_tetrads, min_score, ScanLimits::default())
+    find_owned_bytes_with_topology(
+        sequence,
+        min_tetrads,
+        min_score,
+        ScanLimits::default(),
+        SequenceTopology::Linear,
+    )
 }
 
 pub fn find_owned_bytes_with_limits(
+    sequence: Arc<Vec<u8>>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    find_owned_bytes_with_topology(
+        sequence,
+        min_tetrads,
+        min_score,
+        limits,
+        SequenceTopology::Linear,
+    )
+}
+
+pub fn find_owned_bytes_with_topology(
+    sequence: Arc<Vec<u8>>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+) -> Vec<G4> {
+    if topology.is_circular() {
+        return find_owned_bytes_circular(sequence, min_tetrads, min_score, limits);
+    }
+    find_owned_bytes_linear(sequence, min_tetrads, min_score, limits)
+}
+
+fn find_owned_bytes_linear(
     sequence: Arc<Vec<u8>>,
     min_tetrads: usize,
     min_score: i32,
@@ -55,6 +89,46 @@ pub fn find_owned_bytes_with_limits(
     }
     let seq = Arc::new(SequenceData::from_bytes(sequence));
     find_with_sequence(seq, min_tetrads, min_score, limits)
+}
+
+fn find_owned_bytes_circular(
+    sequence: Arc<Vec<u8>>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+) -> Vec<G4> {
+    let sequence_len = sequence.len();
+    if sequence_len == 0 {
+        return Vec::new();
+    }
+    let prefix_len = circular_prefix_len(sequence_len, limits);
+    let mut extended = Vec::with_capacity(sequence_len + prefix_len);
+    extended.extend_from_slice(sequence.as_slice());
+    if prefix_len > 0 {
+        extended.extend_from_slice(&sequence[..prefix_len]);
+    }
+    let mut hits = find_owned_bytes_linear(Arc::new(extended), min_tetrads, min_score, limits);
+    retain_circular_raw_hits(&mut hits, sequence_len);
+    hits
+}
+
+fn circular_prefix_len(sequence_len: usize, limits: ScanLimits) -> usize {
+    if sequence_len <= 1 {
+        return 0;
+    }
+    limits
+        .max_g4_length
+        .saturating_sub(1)
+        .min(sequence_len.saturating_sub(1))
+}
+
+pub(crate) fn retain_circular_raw_hits(raw_hits: &mut Vec<G4>, sequence_len: usize) {
+    if sequence_len == 0 {
+        raw_hits.clear();
+        return;
+    }
+    raw_hits.retain(|g4| g4.start <= sequence_len && g4.length <= sequence_len);
+    raw_hits.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
 }
 
 pub(crate) fn chunk_size_for_limits(limits: ScanLimits) -> usize {

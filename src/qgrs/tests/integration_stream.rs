@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 
 use crate::qgrs::stream;
-use crate::qgrs::{InputMode, ScanLimits, consolidate_g4s, find_owned_bytes};
+use crate::qgrs::{
+    InputMode, ScanLimits, SequenceTopology, consolidate_g4s, consolidate_g4s_with_topology,
+    find_owned_bytes, find_owned_bytes_with_topology,
+};
 
 #[test]
 fn stream_pipeline_matches_batch_results() {
@@ -66,5 +69,61 @@ fn stream_overlap_exposes_metadata() {
     )
     .unwrap();
     assert_eq!(observed.len(), 1);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn stream_pipeline_matches_batch_results_in_circular_mode() {
+    let path = std::env::temp_dir().join("qgrs_stream_pipeline_circular.fa");
+    let fasta = b">chr1\nGAGGGGAGGGGAGGGGGGG\n>chr2\nACACGGGGAGGGGAGGGGGGGAC\n";
+    fs::write(&path, fasta).unwrap();
+    let limits = ScanLimits::default();
+
+    let sequences = crate::qgrs::load_sequences_from_path(&path, InputMode::Stream).unwrap();
+    let mut expected: HashMap<String, Vec<_>> = HashMap::new();
+    for chrom in &sequences {
+        let seq_len = chrom.sequence().len();
+        let raw = find_owned_bytes_with_topology(
+            chrom.sequence(),
+            4,
+            17,
+            limits,
+            SequenceTopology::Circular,
+        );
+        let (hits, _ranges) =
+            consolidate_g4s_with_topology(raw, SequenceTopology::Circular, seq_len);
+        expected.insert(chrom.name().to_string(), hits);
+    }
+
+    let mut actual: HashMap<String, Vec<_>> = HashMap::new();
+    stream::process_fasta_stream_with_limits_topology(
+        &path,
+        4,
+        17,
+        limits,
+        SequenceTopology::Circular,
+        |name, results| {
+            actual.insert(name, results);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(expected.len(), actual.len());
+    for (name, expected_hits) in expected {
+        let observed = actual.get(&name).expect("missing chromosome");
+        assert_eq!(expected_hits.len(), observed.len());
+        for (lhs, rhs) in expected_hits.iter().zip(observed.iter()) {
+            assert_eq!(lhs.start, rhs.start);
+            assert_eq!(lhs.end, rhs.end);
+            assert_eq!(lhs.length, rhs.length);
+            assert_eq!(lhs.sequence(), rhs.sequence());
+            assert_eq!(lhs.tetrads, rhs.tetrads);
+            assert_eq!(lhs.gscore, rhs.gscore);
+            assert_eq!(lhs.y1, rhs.y1);
+            assert_eq!(lhs.y2, rhs.y2);
+            assert_eq!(lhs.y3, rhs.y3);
+        }
+    }
     fs::remove_file(&path).unwrap();
 }

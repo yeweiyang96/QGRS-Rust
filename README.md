@@ -27,6 +27,7 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 
 - Rust scanner mirrors the legacy scoring heuristics while benefiting from zero-copy iterators and Rayon parallelism.
 - Memory-mapped (`mmap`) and streaming (`stream`) readers let you pick the best strategy per dataset.
+- Optional `--circular` topology support treats each sequence/chromosome as a ring for wrap-around G4 detection.
 - CSV/Parquet exporters always report 1-based, inclusive coordinates for genome-browser compatibility.
 - CLI validation enforces sane tetrad, loop, and window settings to avoid silent misconfiguration.
 - Optional `--overlap` flag writes both the sorted raw hits and post-consolidation family ranges alongside your primary export for diffing and debugging.
@@ -73,7 +74,7 @@ target/release/qgrs --help
 
 ## 🧪 Usage
 
-`qgrs` accepts either an inline sequence (`--sequence`) or an input file (`--file`). FASTA inputs are split per chromosome header, and each slice is processed independently. If you provide a file, choose either the memory-mapped (`mmap`) or buffered streaming (`stream`) pipeline with `--mode`. All examples below assume you already built the release binary (`target/release/qgrs`) or installed it as `qgrs`; use `cargo run --release --bin qgrs -- …` only when iterating locally. The banner below comes straight from `src/bin/qgrs.rs` so it always matches the binary.
+`qgrs` accepts either an inline sequence (`--sequence`) or an input file (`--file`). FASTA inputs are split per chromosome header, and each slice is processed independently. If you provide a file, choose either the memory-mapped (`mmap`) or buffered streaming (`stream`) pipeline with `--mode`. Pass `--circular` when the sequence/chromosome should be scanned as a circular molecule (wrap-around hits allowed). All examples below assume you already built the release binary (`target/release/qgrs`) or installed it as `qgrs`; use `cargo run --release --bin qgrs -- …` only when iterating locally. The banner below comes straight from `src/bin/qgrs.rs` so it always matches the binary.
 
 ```
 Usage: qgrs -- [--sequence <SEQ> | --file <PATH>] [options]
@@ -89,6 +90,7 @@ Options:
    --output-dir <DIR>     Directory for per-chromosome exports when using --file
    --mode <mmap|stream>   Input mode when using --file (default mmap)
    --overlap              Also emit raw hits (.overlap.csv) + family ranges (.family.csv)
+   --circular             Treat each sequence/chromosome as circular
    --help                 Show this message
 ```
 
@@ -133,6 +135,12 @@ target/release/qgrs \
    --mode stream \
    --output-dir ./qgrs_debug \
    --overlap
+
+# 6. Enable circular topology (wrap-around hits)
+target/release/qgrs \
+   --sequence GAGGGGAGGGGAGGGGGGG \
+   --min-tetrads 4 \
+   --circular
 ```
 
 ### CLI reference
@@ -150,6 +158,7 @@ target/release/qgrs \
 | `--output <FILE\|- >`     | Single output file (or `-` for stdout) when scanning inline sequences.                     | stdout for CSV           |
 | `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
 | `--overlap`               | Emit `{base}.overlap.csv` (raw hits) and `{base}.family.csv` (family ranges) per output file. | off                      |
+| `--circular`              | Treat each sequence/chromosome as circular; wrap-around hits may report `end > N`.          | off                      |
 
 The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet.
 
@@ -160,14 +169,14 @@ Both exporters emit the same fields (see `render_csv` and `write_parquet_from_re
 | Column           | Meaning                                                                                 |
 | ---------------- | --------------------------------------------------------------------------------------- |
 | `start`          | 1-based inclusive start coordinate of the hit within the processed sequence/chromosome. |
-| `end`            | 1-based inclusive end coordinate (`start + length - 1`).                                |
+| `end`            | 1-based inclusive end coordinate (`start + length - 1`); in `--circular` mode it may exceed sequence length `N`. |
 | `length`         | Total number of bases spanned by the quadruplex.                                        |
 | `tetrads`        | Count of stacked tetrads contributing to the hit.                                       |
 | `y1`, `y2`, `y3` | Loop lengths between successive G-runs (0 means no spacer).                             |
 | `gscore`         | Legacy G-score used for filtering and ranking candidates.                               |
 | `sequence`       | Exact G4 motif sequence extracted from the input.                                       |
 
-CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences).
+CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences). In circular mode, `start` stays within `1..N` while `end` may exceed `N` for wrap-around motifs.
 
 ### Overlap exports (`--overlap`)
 
@@ -229,4 +238,3 @@ target/release/compare_modes output/chromosome-2L.fa 4 30
 ```
 
 During a run you will see individual sections for the mmap phase, the stream phase, a speed comparison, and the final consistency verdict. An error summary (up to 10 detailed mismatches) is printed before the program returns a non-zero exit status, which makes the tool suitable for automated regression checks.
-

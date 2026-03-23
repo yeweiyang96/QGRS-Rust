@@ -5,7 +5,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use qgrs_rust::qgrs::{self, DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, G4, InputMode, ScanLimits};
+use qgrs_rust::qgrs::{
+    self, DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, G4, InputMode, ScanLimits, SequenceTopology,
+};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
@@ -37,6 +39,7 @@ where
     let mut output_dir: Option<PathBuf> = None;
     let mut mode = InputMode::Mmap;
     let mut include_overlap = false;
+    let mut circular = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -120,6 +123,9 @@ where
             "--overlap" => {
                 include_overlap = true;
             }
+            "--circular" => {
+                circular = true;
+            }
             "--help" | "-h" => return Err(usage("")),
             other => {
                 return Err(usage(&format!("unknown argument '{other}'")));
@@ -147,7 +153,12 @@ where
     }
 
     let limits = ScanLimits::new(max_g4_length, max_g_run);
-    let scan = ScanConfig::new(min_tetrads, min_score, limits);
+    let topology = if circular {
+        SequenceTopology::Circular
+    } else {
+        SequenceTopology::Linear
+    };
+    let scan = ScanConfig::new(min_tetrads, min_score, limits, topology);
 
     match input {
         InputSpec::Inline(seq) => {
@@ -193,6 +204,7 @@ fn usage(reason: &str) -> String {
     msg.push_str(
         "  --overlap            Emit raw hits (.overlap.csv) and family ranges (.family.csv)\n",
     );
+    msg.push_str("  --circular           Treat each sequence/chromosome as circular\n");
     msg.push_str("  --help               Show this message\n");
     msg
 }
@@ -215,14 +227,21 @@ struct ScanConfig {
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    topology: SequenceTopology,
 }
 
 impl ScanConfig {
-    fn new(min_tetrads: usize, min_score: i32, limits: ScanLimits) -> Self {
+    fn new(
+        min_tetrads: usize,
+        min_score: i32,
+        limits: ScanLimits,
+        topology: SequenceTopology,
+    ) -> Self {
         Self {
             min_tetrads,
             min_score,
             limits,
+            topology,
         }
     }
 
@@ -237,6 +256,10 @@ impl ScanConfig {
     fn limits(self) -> ScanLimits {
         self.limits
     }
+
+    fn topology(self) -> SequenceTopology {
+        self.topology
+    }
 }
 
 fn process_inline_sequence(
@@ -248,16 +271,19 @@ fn process_inline_sequence(
 ) -> Result<(), String> {
     let mut normalized = sequence.into_bytes();
     normalized.make_ascii_lowercase();
+    let sequence_len = normalized.len();
     if include_overlap && output_path.is_none() {
         return Err(usage("--overlap requires --output when using --sequence"));
     }
-    let raw = qgrs::find_owned_bytes_with_limits(
+    let raw = qgrs::find_owned_bytes_with_topology(
         Arc::new(normalized),
         scan.min_tetrads(),
         scan.min_score(),
         scan.limits(),
+        scan.topology(),
     );
-    let (results, family_ranges, raw_hits) = consolidate_for_export(raw, include_overlap);
+    let (results, family_ranges, raw_hits) =
+        consolidate_for_export(raw, include_overlap, scan.topology(), sequence_len);
     match format {
         OutputFormat::Csv => {
             let csv = qgrs::render_csv_results(&results);
@@ -312,14 +338,16 @@ fn process_fasta_file(
             chrom_outputs.into_par_iter().try_for_each(
                 |(chrom, filepath)| -> Result<(), String> {
                     let (name, sequence) = chrom.into_parts();
-                    let raw = qgrs::find_owned_bytes_with_limits(
+                    let sequence_len = sequence.len();
+                    let raw = qgrs::find_owned_bytes_with_topology(
                         sequence,
                         scan.min_tetrads(),
                         scan.min_score(),
                         scan.limits(),
+                        scan.topology(),
                     );
                     let (results, family_ranges, raw_hits) =
-                        consolidate_for_export(raw, include_overlap);
+                        consolidate_for_export(raw, include_overlap, scan.topology(), sequence_len);
                     // println!(
                     //     "chromosome: {}, g4 consolidated hits: {}",
                     //     name,
@@ -352,11 +380,12 @@ fn process_fasta_file(
         InputMode::Stream => {
             let mut processed = 0usize;
             if include_overlap {
-                qgrs::stream::process_fasta_stream_with_limits_overlap(
+                qgrs::stream::process_fasta_stream_with_limits_overlap_topology(
                     &path,
                     scan.min_tetrads(),
                     scan.min_score(),
                     scan.limits(),
+                    scan.topology(),
                     |name, mut stream_results| {
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
@@ -384,11 +413,12 @@ fn process_fasta_file(
                 )
                 .map_err(|err| format!("failed to process {path:?}: {err}"))?;
             } else {
-                qgrs::stream::process_fasta_stream_with_limits(
+                qgrs::stream::process_fasta_stream_with_limits_topology(
                     &path,
                     scan.min_tetrads(),
                     scan.min_score(),
                     scan.limits(),
+                    scan.topology(),
                     |name, results| {
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
@@ -457,13 +487,18 @@ fn sanitize_name(raw: &str) -> String {
 
 type ConsolidatedResults = (Vec<G4>, Vec<(usize, usize)>, Option<Vec<G4>>);
 
-fn consolidate_for_export(raw: Vec<G4>, capture_raw: bool) -> ConsolidatedResults {
+fn consolidate_for_export(
+    raw: Vec<G4>,
+    capture_raw: bool,
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> ConsolidatedResults {
     if capture_raw {
         let raw_copy = raw.clone();
-        let (hits, ranges) = qgrs::consolidate_g4s(raw);
+        let (hits, ranges) = qgrs::consolidate_g4s_with_topology(raw, topology, sequence_len);
         (hits, ranges, Some(raw_copy))
     } else {
-        let (hits, ranges) = qgrs::consolidate_g4s(raw);
+        let (hits, ranges) = qgrs::consolidate_g4s_with_topology(raw, topology, sequence_len);
         (hits, ranges, None)
     }
 }
@@ -571,6 +606,20 @@ mod tests {
         assert!(err.is_err());
         let msg = err.unwrap_err();
         assert!(msg.contains("--overlap requires --output"));
+    }
+
+    #[test]
+    fn circular_flag_is_supported_for_inline_scan() {
+        let result = run_with_args([
+            "--sequence",
+            "GAGGGGAGGGGAGGGGGGG",
+            "--min-tetrads",
+            "4",
+            "--min-score",
+            "17",
+            "--circular",
+        ]);
+        assert!(result.is_ok());
     }
 
     fn run_with_args<const N: usize>(args: [&'static str; N]) -> Result<(), String> {
