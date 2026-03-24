@@ -39,20 +39,20 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 - `cargo` is required for building, running, and testing.
 - macOS and Linux are tested; Windows should work via WSL2.
 
-## 🧱 架构
+## 🧱 Architecture
 
-QGRS-Rust 的核心位于 `src/qgrs/`，每个模块对应搜索管线中的独立阶段：
+The core of QGRS-Rust lives in `src/qgrs/`, where each module maps to a distinct stage of the search pipeline:
 
-- `data.rs`：定义 `ChromSequence`、`SequenceData`、`ScanLimits` 等零拷贝数据容器。
-- `search.rs`：实现 G-run 扫描、BFS 候选扩展、计分与原始 `G4` 构造。
-- `chunks.rs`：根据 `ScanLimits` 计算窗口与重叠，调度 `find_raw_*` 并合并 Rayon 结果。
-- `consolidation.rs`：对原始命中去重、聚类，保留每个重叠家族的最高 `gscore`。
-- `stream.rs`：实现 `StreamChromosome`/`StreamChunkScheduler`，增量解析超大 FASTA。
-- `loaders.rs`：封装 mmap 与普通文件加载器，供 CLI 在批量模式下复用。
-- `export.rs`：提供 CSV/Parquet 渲染器及错误类型，统一 1-based 坐标输出。
-- `tests/`：集中单元与集成测试，确保 chunk/stream 模式结果一致。
+- `data.rs`: Defines zero-copy data containers such as `ChromSequence`, `SequenceData`, and `ScanLimits`.
+- `search.rs`: Implements G-run scanning, BFS candidate expansion, scoring, and raw `G4` construction.
+- `chunks.rs`: Computes windows and overlaps from `ScanLimits`, dispatches `find_raw_*`, and merges Rayon results.
+- `consolidation.rs`: Deduplicates and clusters raw hits, keeping the highest `gscore` in each overlap family.
+- `stream.rs`: Implements `StreamChromosome`/`StreamChunkScheduler` for incremental parsing of huge FASTA files.
+- `loaders.rs`: Wraps mmap and regular file loaders for CLI reuse in batch mode.
+- `export.rs`: Provides CSV/Parquet renderers and error types with consistent 1-based coordinate output.
+- `tests/`: Centralizes unit and integration tests to ensure chunk/stream mode consistency.
 
-`src/lib.rs` 只负责 re-export 公共 API，`src/bin/qgrs.rs` 将 CLI 选项映射到上述模块，保持入口简洁。
+`src/lib.rs` only re-exports the public API, while `src/bin/qgrs.rs` maps CLI options to the modules above to keep the entrypoint clean.
 
 ## ⚙️ Build
 
