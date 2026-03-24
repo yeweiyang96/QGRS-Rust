@@ -10,7 +10,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <fasta_path> [min_tetrads] [min_gscore]", args[0]);
+        eprintln!(
+            "Usage: {} <fasta_path_or_gz> [min_tetrads] [min_gscore]",
+            args[0]
+        );
         eprintln!("\nExamples:");
         eprintln!("  {} dme.fa", args[0]);
         eprintln!("  {} dme.fa 3 17", args[0]);

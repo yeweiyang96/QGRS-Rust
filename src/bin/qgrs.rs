@@ -208,7 +208,7 @@ fn usage(reason: &str) -> String {
     msg.push_str("Options:\n");
     msg.push_str("  --sequence <SEQ>     Inline DNA/RNA sequence to scan\n");
     msg.push_str(
-        "  --file <PATH>        Read sequences from FASTA (chromosomes split independently)\n",
+        "  --file <PATH>        Read sequences from FASTA/FASTA.gz (chromosomes split independently)\n",
     );
     msg.push_str("  --min-tetrads <N>    Minimum tetrads to seed (default 2)\n");
     msg.push_str("  --min-score <S>      Minimum g-score (default 17)\n");
@@ -911,7 +911,11 @@ impl OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
 
     #[test]
     fn default_limits_are_valid() {
@@ -1267,6 +1271,71 @@ mod tests {
         let _ = fs::remove_dir_all(&stream_dir);
     }
 
+    #[test]
+    fn gzip_file_outputs_match_between_default_mmap_and_stream() {
+        let base = unique_test_path("qgrs_gzip_modes");
+        let fasta = base.with_extension("fa");
+        let fasta_gz = base.with_extension("fna.data");
+        let fasta_bytes = b">chr1\nGAGGGGAGGGGAGGGGGGG\n>chr2\nGGGCGGGGAGGGGAGGGGAG\n";
+        fs::write(&fasta, fasta_bytes).unwrap();
+        write_gzip(&fasta_gz, fasta_bytes);
+
+        let mmap_dir = unique_test_path("qgrs_gzip_mmap_out");
+        let stream_dir = unique_test_path("qgrs_gzip_stream_out");
+        fs::create_dir_all(&mmap_dir).unwrap();
+        fs::create_dir_all(&stream_dir).unwrap();
+
+        let fasta_gz_str = fasta_gz.to_string_lossy().into_owned();
+        let mmap_dir_str = mmap_dir.to_string_lossy().into_owned();
+        let stream_dir_str = stream_dir.to_string_lossy().into_owned();
+
+        let mmap_result = run_with_owned_args(vec![
+            "--file".to_string(),
+            fasta_gz_str.clone(),
+            "--output-dir".to_string(),
+            mmap_dir_str,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--overlap".to_string(),
+        ]);
+        assert!(mmap_result.is_ok());
+
+        let stream_result = run_with_owned_args(vec![
+            "--file".to_string(),
+            fasta_gz_str,
+            "--mode".to_string(),
+            "stream".to_string(),
+            "--output-dir".to_string(),
+            stream_dir_str,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--overlap".to_string(),
+        ]);
+        assert!(stream_result.is_ok());
+
+        for filename in [
+            "chr1.csv",
+            "chr1.overlap.csv",
+            "chr1.family.csv",
+            "chr2.csv",
+            "chr2.overlap.csv",
+            "chr2.family.csv",
+        ] {
+            let mmap_contents = fs::read_to_string(mmap_dir.join(filename)).unwrap();
+            let stream_contents = fs::read_to_string(stream_dir.join(filename)).unwrap();
+            assert_eq!(mmap_contents, stream_contents, "mismatch for {filename}");
+        }
+
+        let _ = fs::remove_file(&fasta);
+        let _ = fs::remove_file(&fasta_gz);
+        let _ = fs::remove_dir_all(&mmap_dir);
+        let _ = fs::remove_dir_all(&stream_dir);
+    }
+
     fn run_with_args<const N: usize>(args: [&'static str; N]) -> Result<(), String> {
         let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
         run_with_owned_args(args)
@@ -1286,5 +1355,12 @@ mod tests {
             .expect("system time before unix epoch")
             .as_nanos();
         env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nonce))
+    }
+
+    fn write_gzip(path: &Path, bytes: &[u8]) {
+        let file = fs::File::create(path).expect("create gzip file");
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        encoder.write_all(bytes).expect("write gzip data");
+        encoder.finish().expect("finish gzip");
     }
 }

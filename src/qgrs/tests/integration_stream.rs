@@ -1,5 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
+use std::path::Path;
+
+use flate2::Compression;
+use flate2::write::GzEncoder;
 
 use crate::qgrs::stream;
 use crate::qgrs::{
@@ -126,4 +131,54 @@ fn stream_pipeline_matches_batch_results_in_circular_mode() {
         }
     }
     fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn stream_pipeline_reads_gzip_and_matches_plain_results() {
+    let plain = std::env::temp_dir().join("qgrs_stream_pipeline_gzip.fa");
+    let gzip = std::env::temp_dir().join("qgrs_stream_pipeline_gzip.fa.gz");
+    let fasta = b">chr1 desc\nGGGGAGGGGTTTTGGGG\n>chr2\nACACGGGGACACGGGG\n";
+    fs::write(&plain, fasta).unwrap();
+    write_gzip(&gzip, fasta);
+
+    let mut plain_results: HashMap<String, Vec<_>> = HashMap::new();
+    stream::process_fasta_stream(&plain, 2, 17, |name, results| {
+        plain_results.insert(name, results);
+        Ok(())
+    })
+    .unwrap();
+
+    let mut gzip_results: HashMap<String, Vec<_>> = HashMap::new();
+    stream::process_fasta_stream(&gzip, 2, 17, |name, results| {
+        gzip_results.insert(name, results);
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(plain_results.len(), gzip_results.len());
+    for (name, plain_hits) in plain_results {
+        let gzip_hits = gzip_results.get(&name).expect("missing chromosome");
+        assert_eq!(plain_hits.len(), gzip_hits.len());
+        for (lhs, rhs) in plain_hits.iter().zip(gzip_hits.iter()) {
+            assert_eq!(lhs.start, rhs.start);
+            assert_eq!(lhs.end, rhs.end);
+            assert_eq!(lhs.length, rhs.length);
+            assert_eq!(lhs.sequence(), rhs.sequence());
+            assert_eq!(lhs.tetrads, rhs.tetrads);
+            assert_eq!(lhs.gscore, rhs.gscore);
+            assert_eq!(lhs.y1, rhs.y1);
+            assert_eq!(lhs.y2, rhs.y2);
+            assert_eq!(lhs.y3, rhs.y3);
+        }
+    }
+
+    fs::remove_file(&plain).unwrap();
+    fs::remove_file(&gzip).unwrap();
+}
+
+fn write_gzip(path: &Path, bytes: &[u8]) {
+    let file = fs::File::create(path).expect("create gzip file");
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    encoder.write_all(bytes).expect("write gzip data");
+    encoder.finish().expect("finish gzip");
 }

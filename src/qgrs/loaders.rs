@@ -1,11 +1,13 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, Read};
 use std::path::Path;
 use std::sync::Arc;
 
 use memmap2::MmapOptions;
 
 use crate::qgrs::data::{ChromSequence, InputMode};
+
+use super::input::{is_gzip_path, open_input_reader};
 
 pub fn load_sequences_from_path(path: &Path, mode: InputMode) -> io::Result<Vec<ChromSequence>> {
     match mode {
@@ -15,8 +17,11 @@ pub fn load_sequences_from_path(path: &Path, mode: InputMode) -> io::Result<Vec<
 }
 
 fn load_sequences_stream(path: &Path) -> io::Result<Vec<ChromSequence>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(1 << 20, file);
+    let mut reader = open_input_reader(path)?;
+    parse_sequences_from_reader(reader.as_mut())
+}
+
+fn parse_sequences_from_reader(reader: &mut dyn BufRead) -> io::Result<Vec<ChromSequence>> {
     let mut sequences = Vec::new();
     let mut current_name: Option<String> = None;
     let mut sequence: Vec<u8> = Vec::new();
@@ -49,15 +54,25 @@ fn load_sequences_stream(path: &Path) -> io::Result<Vec<ChromSequence>> {
 }
 
 fn load_sequences_mmap(path: &Path) -> io::Result<Vec<ChromSequence>> {
+    if is_gzip_path(path)? {
+        let mut reader = open_input_reader(path)?;
+        let mut decompressed = Vec::new();
+        reader.read_to_end(&mut decompressed)?;
+        return Ok(parse_sequences_from_bytes(&decompressed));
+    }
     let file = File::open(path)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
+    Ok(parse_sequences_from_bytes(&mmap))
+}
+
+fn parse_sequences_from_bytes(bytes: &[u8]) -> Vec<ChromSequence> {
     let mut sequences = Vec::new();
-    let mut sequence = Vec::with_capacity(mmap.len());
+    let mut sequence = Vec::with_capacity(bytes.len());
     let mut current_name: Option<String> = None;
     let mut at_line_start = true;
     let mut i = 0;
-    while i < mmap.len() {
-        let byte = mmap[i];
+    while i < bytes.len() {
+        let byte = bytes[i];
         if byte == b'\n' || byte == b'\r' {
             at_line_start = true;
             i += 1;
@@ -67,10 +82,10 @@ fn load_sequences_mmap(path: &Path) -> io::Result<Vec<ChromSequence>> {
             finalize_sequence(&mut current_name, &mut sequence, &mut sequences);
             i += 1;
             let header_start = i;
-            while i < mmap.len() && mmap[i] != b'\n' && mmap[i] != b'\r' {
+            while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
                 i += 1;
             }
-            let header = &mmap[header_start..i];
+            let header = &bytes[header_start..i];
             current_name = Some(parse_chrom_name_bytes(header, sequences.len() + 1));
             at_line_start = true;
             continue;
@@ -92,7 +107,7 @@ fn load_sequences_mmap(path: &Path) -> io::Result<Vec<ChromSequence>> {
             sequence: Arc::new(std::mem::take(&mut sequence)),
         });
     }
-    Ok(sequences)
+    sequences
 }
 
 fn finalize_sequence(

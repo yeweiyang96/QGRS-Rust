@@ -4,6 +4,7 @@ mod chunks;
 mod consolidation;
 mod data;
 mod export;
+mod input;
 mod loaders;
 mod search;
 #[cfg(test)]

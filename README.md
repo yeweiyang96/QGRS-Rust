@@ -75,13 +75,13 @@ target/release/qgrs --help
 
 ## 🧪 Usage
 
-`qgrs` accepts either an inline sequence (`--sequence`) or an input file (`--file`). FASTA inputs are split per chromosome header, and each slice is processed independently. If you provide a file, choose either the memory-mapped (`mmap`) or buffered streaming (`stream`) pipeline with `--mode`. Pass `--circular` when the sequence/chromosome should be scanned as a circular molecule (wrap-around hits allowed), and pass `--revcomp` to also scan the reverse-complement strand into separate output files. All examples below assume you already built the release binary (`target/release/qgrs`) or installed it as `qgrs`; use `cargo run --release --bin qgrs -- …` only when iterating locally. The banner below comes straight from `src/bin/qgrs.rs` so it always matches the binary.
+`qgrs` accepts either an inline sequence (`--sequence`) or an input file (`--file`). FASTA inputs (plain text or gzip-compressed `.gz`) are split per chromosome header, and each slice is processed independently. If you provide a file, choose either the memory-mapped (`mmap`) or buffered streaming (`stream`) pipeline with `--mode`. Pass `--circular` when the sequence/chromosome should be scanned as a circular molecule (wrap-around hits allowed), and pass `--revcomp` to also scan the reverse-complement strand into separate output files. All examples below assume you already built the release binary (`target/release/qgrs`) or installed it as `qgrs`; use `cargo run --release --bin qgrs -- …` only when iterating locally. The banner below comes straight from `src/bin/qgrs.rs` so it always matches the binary.
 
 ```
 Usage: qgrs -- [--sequence <SEQ> | --file <PATH>] [options]
 Options:
    --sequence <SEQ>       Inline DNA/RNA sequence to scan
-   --file <PATH>          Read sequences from FASTA (chromosomes split independently)
+   --file <PATH>          Read sequences from FASTA/FASTA.gz (chromosomes split independently)
    --min-tetrads <N>      Minimum tetrads to seed (default 2)
    --min-score <S>        Minimum g-score (default 17)
    --max-g-run <N>        Maximum allowed G-run length (default 10)
@@ -114,9 +114,9 @@ target/release/qgrs \
    --min-score 20 \
    --output-dir ./qgrs_csv
 
-# 3. Stream extremely large FASTA with Parquet output
+# 3. Stream extremely large FASTA (plain or .gz) with Parquet output
 target/release/qgrs \
-   --file hg38.fa \
+   --file hg38.fa.gz \
    --mode stream \
    --min-tetrads 3 \
    --max-g-run 12 \
@@ -159,7 +159,7 @@ target/release/qgrs \
 | Flag                      | Description                                                                                | Default                  |
 | ------------------------- | ------------------------------------------------------------------------------------------ | ------------------------ |
 | `--sequence <SEQ>`        | Inline DNA sequence to scan (mutually exclusive with `--file`).                            | _none_                   |
-| `--file <PATH>`           | FASTA or plain-text file containing one or more sequences.                                 | _none_                   |
+| `--file <PATH>`           | FASTA input path (plain text or gzip-compressed `.gz`) containing one or more sequences.   | _none_                   |
 | `--mode <mmap\|stream>`   | File ingestion strategy; `mmap` favors fast disks, `stream` lowers RAM.                    | `mmap`                   |
 | `--min-tetrads <INT>`     | Minimum number of stacked tetrads required for a hit.                                      | `2`                      |
 | `--min-score <INT>`       | Minimum legacy G-score threshold.                                                          | `17`                     |
