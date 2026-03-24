@@ -3,9 +3,6 @@
 <div align="center">
  
 ![Rust 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust&logoColor=white)
-![Platforms macOS/Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey?logo=apple&logoColor=white)
-![Outputs CSV / Parquet](https://img.shields.io/badge/output-CSV%20%7C%20Parquet-0e83cd)
-![Mode mmap / stream](https://img.shields.io/badge/mode-mmap%20%7C%20stream-6f42c1)
 
 </div>
 
