@@ -167,7 +167,7 @@ target/release/qgrs \
 | `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
 | `--overlap`               | Emit `{base}.overlap.<format>` (raw hits) and `{base}.family.<format>` (family ranges) per output file. | off                      |
 | `--revcomp`               | Emit additional reverse-complement outputs `{base}.revcomp.<format>` with coordinates mapped back to forward-strand coordinates. | off                      |
-| `--circular`              | Treat each sequence/chromosome as circular; CLI exports map wrap-around hits back to ring coordinates, so `end` may be `< start`. | off                      |
+| `--circular`              | Treat each sequence/chromosome as circular; wrap-around hits keep expanded coordinates in output, so `end` may exceed chromosome length `N`. | off                      |
 
 The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet. If `--revcomp` or `--overlap` is enabled for inline scans, `--output` is required so sidecar files can be named deterministically.
 
@@ -178,14 +178,14 @@ Both exporters emit the same fields (see `render_csv` and `write_parquet_from_re
 | Column           | Meaning                                                                                 |
 | ---------------- | --------------------------------------------------------------------------------------- |
 | `start`          | 1-based inclusive start coordinate of the hit within the processed sequence/chromosome. |
-| `end`            | 1-based inclusive end coordinate. In CLI `--circular` exports, wrap-around hits are mapped back to ring coordinates, so `end` may be smaller than `start`. |
+| `end`            | 1-based inclusive end coordinate. In circular mode, wrap-around hits keep expanded coordinates, so `end` may be larger than the chromosome length `N`. |
 | `length`         | Total number of bases spanned by the quadruplex.                                        |
 | `tetrads`        | Count of stacked tetrads contributing to the hit.                                       |
 | `y1`, `y2`, `y3` | Loop lengths between successive G-runs (0 means no spacer).                             |
 | `gscore`         | Legacy G-score used for filtering and ranking candidates.                               |
 | `sequence`       | Exact G4 motif sequence extracted from the input.                                       |
 
-CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences). In CLI circular exports, both coordinates stay within `1..N`; wrap-around motifs are represented by `end < start`. The library APIs still keep their internal expanded-coordinate representation for circular hits.
+CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences). In circular mode, CLI exports keep the same expanded-coordinate representation used internally, so wrap-around motifs can appear with `end > N`.
 
 ### Overlap exports (`--overlap`)
 
@@ -203,7 +203,7 @@ Pass `--revcomp` to emit an additional result file for each primary output, with
 - Reverse-complement scans use the same thresholds and topology settings as forward scans.
 - `start`/`end` in `.revcomp` outputs are mapped back to forward-strand coordinates:
   - Linear: `start' = N - end_rc + 1`, `end' = N - start_rc + 1`
-  - Circular: project `end_rc` back to ring coordinates first, then apply the same mapping.
+  - Circular: anchor `end_rc` onto the first copy to compute `start'`, then preserve the original interval length so the mapped hit stays in expanded coordinates.
 - The `sequence` column in `.revcomp` outputs remains in reverse-complement scan direction (negative strand 5'→3').
 
 If `--overlap` is also enabled, revcomp sidecars are emitted too: `{base}.revcomp.overlap.<format>` and `{base}.revcomp.family.<format>`.

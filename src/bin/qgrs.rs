@@ -748,13 +748,13 @@ fn map_revcomp_interval(
     topology: SequenceTopology,
     sequence_len: usize,
 ) -> (usize, usize) {
-    let end_rc_projected = projected_end(end_rc, topology, sequence_len);
-    let start = sequence_len - end_rc_projected + 1;
-    let end = sequence_len - start_rc + 1;
+    let end_anchor = circular_end_anchor(end_rc, topology, sequence_len);
+    let start = sequence_len - end_anchor + 1;
+    let end = start + (end_rc - start_rc);
     (start, end)
 }
 
-fn projected_end(end: usize, topology: SequenceTopology, sequence_len: usize) -> usize {
+fn circular_end_anchor(end: usize, topology: SequenceTopology, sequence_len: usize) -> usize {
     if !topology.is_circular() || sequence_len == 0 || end == 0 {
         return end;
     }
@@ -765,12 +765,12 @@ fn write_primary_output(
     output_path: Option<&Path>,
     format: OutputFormat,
     results: &[G4],
-    topology: SequenceTopology,
-    sequence_len: usize,
+    _topology: SequenceTopology,
+    _sequence_len: usize,
 ) -> Result<(), String> {
     match format {
         OutputFormat::Csv => {
-            let csv = qgrs::render_csv_results_with_projection(results, topology, sequence_len);
+            let csv = qgrs::render_csv_results(results);
             if let Some(path) = output_path {
                 fs::write(path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?;
             } else {
@@ -781,7 +781,7 @@ fn write_primary_output(
         OutputFormat::Parquet => {
             let path =
                 output_path.ok_or_else(|| usage("--output is required when --format parquet"))?;
-            write_results_to_path(path, format, results, topology, sequence_len)
+            write_results_to_path(path, format, results, _topology, _sequence_len)
         }
     }
 }
@@ -790,18 +790,18 @@ fn write_results_to_path(
     path: &Path,
     format: OutputFormat,
     results: &[G4],
-    topology: SequenceTopology,
-    sequence_len: usize,
+    _topology: SequenceTopology,
+    _sequence_len: usize,
 ) -> Result<(), String> {
     match format {
         OutputFormat::Csv => {
-            let csv = qgrs::render_csv_results_with_projection(results, topology, sequence_len);
+            let csv = qgrs::render_csv_results(results);
             fs::write(path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?;
         }
         OutputFormat::Parquet => {
             let file = fs::File::create(path)
                 .map_err(|err| format!("failed to create {path:?}: {err}"))?;
-            qgrs::write_parquet_results_with_projection(results, file, topology, sequence_len)
+            qgrs::write_parquet_results(results, file)
                 .map_err(|err| format!("failed to write parquet {path:?}: {err}"))?;
         }
     }
@@ -813,46 +813,31 @@ fn write_overlap_exports(
     format: OutputFormat,
     raw_hits: &[G4],
     family_ranges: &[(usize, usize)],
-    topology: SequenceTopology,
-    sequence_len: usize,
+    _topology: SequenceTopology,
+    _sequence_len: usize,
 ) -> Result<(), String> {
     let overlap_path = overlap_path(base, format);
     let family_path = family_path(base, format);
     match format {
         OutputFormat::Csv => {
-            let overlap_csv =
-                qgrs::render_csv_results_with_projection(raw_hits, topology, sequence_len);
+            let overlap_csv = qgrs::render_csv_results(raw_hits);
             fs::write(&overlap_path, overlap_csv)
                 .map_err(|err| format!("failed to write {overlap_path:?}: {err}"))?;
 
-            let family_csv = qgrs::render_family_ranges_csv_with_projection(
-                family_ranges,
-                topology,
-                sequence_len,
-            );
+            let family_csv = qgrs::render_family_ranges_csv(family_ranges);
             fs::write(&family_path, family_csv)
                 .map_err(|err| format!("failed to write {family_path:?}: {err}"))?;
         }
         OutputFormat::Parquet => {
             let overlap_file = fs::File::create(&overlap_path)
                 .map_err(|err| format!("failed to create {overlap_path:?}: {err}"))?;
-            qgrs::write_parquet_results_with_projection(
-                raw_hits,
-                overlap_file,
-                topology,
-                sequence_len,
-            )
-            .map_err(|err| format!("failed to write parquet {overlap_path:?}: {err}"))?;
+            qgrs::write_parquet_results(raw_hits, overlap_file)
+                .map_err(|err| format!("failed to write parquet {overlap_path:?}: {err}"))?;
 
             let family_file = fs::File::create(&family_path)
                 .map_err(|err| format!("failed to create {family_path:?}: {err}"))?;
-            qgrs::write_parquet_family_ranges_with_projection(
-                family_ranges,
-                family_file,
-                topology,
-                sequence_len,
-            )
-            .map_err(|err| format!("failed to write parquet {family_path:?}: {err}"))?;
+            qgrs::write_parquet_family_ranges(family_ranges, family_file)
+                .map_err(|err| format!("failed to write parquet {family_path:?}: {err}"))?;
         }
     }
     Ok(())
@@ -974,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn circular_cli_outputs_map_coordinates_back_to_ring() {
+    fn circular_cli_outputs_keep_expanded_coordinates() {
         let base = unique_test_path("qgrs_circular_cli");
         let output = base.with_extension("csv");
         let output_str = output.to_string_lossy().into_owned();
@@ -993,7 +978,7 @@ mod tests {
         assert!(result.is_ok());
 
         let csv = fs::read_to_string(&output).expect("main output");
-        assert!(csv.contains("\n17,16,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
+        assert!(csv.contains("\n17,35,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
 
         let overlap =
             fs::read_to_string(overlap_path(&output, OutputFormat::Csv)).expect("overlap output");
@@ -1002,13 +987,13 @@ mod tests {
             let start = cols.next().unwrap().parse::<usize>().unwrap();
             let end = cols.next().unwrap().parse::<usize>().unwrap();
             assert!(start <= 19);
-            assert!(end <= 19);
+            assert!(end >= start);
         }
         assert!(overlap.lines().skip(1).any(|line| {
             let mut cols = line.split(',');
-            let start = cols.next().unwrap().parse::<usize>().unwrap();
+            let _start = cols.next().unwrap().parse::<usize>().unwrap();
             let end = cols.next().unwrap().parse::<usize>().unwrap();
-            end < start
+            end > 19
         }));
 
         let family =
@@ -1019,8 +1004,8 @@ mod tests {
         let start = cols.next().unwrap().parse::<usize>().unwrap();
         let end = cols.next().unwrap().parse::<usize>().unwrap();
         assert!(start <= 19);
-        assert!(end <= 19);
-        assert!(end < start);
+        assert!(end > 19);
+        assert!(end >= start);
 
         let _ = fs::remove_file(&output);
         let _ = fs::remove_file(overlap_path(&output, OutputFormat::Csv));
@@ -1089,11 +1074,11 @@ mod tests {
     }
 
     #[test]
-    fn revcomp_interval_mapping_for_circular_uses_projected_end() {
+    fn revcomp_interval_mapping_for_circular_keeps_expanded_coordinates() {
         let (start, end) = map_revcomp_interval(17, 35, SequenceTopology::Circular, 19);
         assert_eq!(start, 4);
-        assert_eq!(end, 3);
-        assert!(end < start);
+        assert_eq!(end, 22);
+        assert!(end > 19);
     }
 
     #[test]

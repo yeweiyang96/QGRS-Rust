@@ -178,7 +178,7 @@ fn circular_consolidation_merges_wraparound_family() {
 }
 
 #[test]
-fn circular_projected_csv_maps_end_back_to_ring() {
+fn circular_export_helpers_keep_expanded_coordinates() {
     let sequence = "GAGGGGAGGGGAGGGGGGG";
     let limits = ScanLimits::default();
     let raw = find_owned_bytes_with_topology(
@@ -192,7 +192,7 @@ fn circular_projected_csv_maps_end_back_to_ring() {
         consolidate_g4s_with_topology(raw, SequenceTopology::Circular, sequence.len());
 
     let csv = render_csv_results_with_projection(&hits, SequenceTopology::Circular, sequence.len());
-    assert!(csv.contains("\n17,16,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
+    assert!(csv.contains("\n17,35,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
 
     let family_csv = render_family_ranges_csv_with_projection(
         &ranges,
@@ -205,8 +205,8 @@ fn circular_projected_csv_maps_end_back_to_ring() {
     let start = cols.next().unwrap().parse::<usize>().unwrap();
     let end = cols.next().unwrap().parse::<usize>().unwrap();
     assert!(start <= sequence.len());
-    assert!(end <= sequence.len());
-    assert!(end < start);
+    assert!(end > sequence.len());
+    assert!(end >= start);
 }
 
 fn write_gzip(path: &Path, bytes: &[u8]) {
