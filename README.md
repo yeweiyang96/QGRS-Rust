@@ -158,7 +158,7 @@ target/release/qgrs \
 | `--output <FILE\|- >`     | Single output file (or `-` for stdout) when scanning inline sequences.                     | stdout for CSV           |
 | `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
 | `--overlap`               | Emit `{base}.overlap.csv` (raw hits) and `{base}.family.csv` (family ranges) per output file. | off                      |
-| `--circular`              | Treat each sequence/chromosome as circular; wrap-around hits may report `end > N`.          | off                      |
+| `--circular`              | Treat each sequence/chromosome as circular; CLI exports map wrap-around hits back to ring coordinates, so `end` may be `< start`. | off                      |
 
 The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet.
 
@@ -169,14 +169,14 @@ Both exporters emit the same fields (see `render_csv` and `write_parquet_from_re
 | Column           | Meaning                                                                                 |
 | ---------------- | --------------------------------------------------------------------------------------- |
 | `start`          | 1-based inclusive start coordinate of the hit within the processed sequence/chromosome. |
-| `end`            | 1-based inclusive end coordinate (`start + length - 1`); in `--circular` mode it may exceed sequence length `N`. |
+| `end`            | 1-based inclusive end coordinate. In CLI `--circular` exports, wrap-around hits are mapped back to ring coordinates, so `end` may be smaller than `start`. |
 | `length`         | Total number of bases spanned by the quadruplex.                                        |
 | `tetrads`        | Count of stacked tetrads contributing to the hit.                                       |
 | `y1`, `y2`, `y3` | Loop lengths between successive G-runs (0 means no spacer).                             |
 | `gscore`         | Legacy G-score used for filtering and ranking candidates.                               |
 | `sequence`       | Exact G4 motif sequence extracted from the input.                                       |
 
-CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences). In circular mode, `start` stays within `1..N` while `end` may exceed `N` for wrap-around motifs.
+CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,sequence`. When scanning FASTA inputs, each chromosome is written to its own file (so the filename, not a column, captures the chromosome name). Parquet exports contain the same columns using Arrow types (`UInt64` for coordinates/lengths, `Int32` for loop lengths and score, and UTF-8 for sequences). In CLI circular exports, both coordinates stay within `1..N`; wrap-around motifs are represented by `end < start`. The library APIs still keep their internal expanded-coordinate representation for circular hits.
 
 ### Overlap exports (`--overlap`)
 

@@ -4,6 +4,7 @@ use std::fs;
 use crate::qgrs::{
     InputMode, ScanLimits, SequenceTopology, consolidate_g4s, consolidate_g4s_with_topology,
     find_owned_bytes, find_owned_bytes_with_topology, load_sequences_from_path, render_csv_results,
+    render_csv_results_with_projection, render_family_ranges_csv_with_projection,
     write_parquet_results,
 };
 
@@ -125,4 +126,36 @@ fn circular_consolidation_merges_wraparound_family() {
     assert_eq!(hits.len(), 1);
     assert_eq!(ranges.len(), 1);
     assert!(ranges[0].1 > sequence.len());
+}
+
+#[test]
+fn circular_projected_csv_maps_end_back_to_ring() {
+    let sequence = "GAGGGGAGGGGAGGGGGGG";
+    let limits = ScanLimits::default();
+    let raw = find_owned_bytes_with_topology(
+        arc_from_sequence(sequence),
+        4,
+        17,
+        limits,
+        SequenceTopology::Circular,
+    );
+    let (hits, ranges) =
+        consolidate_g4s_with_topology(raw, SequenceTopology::Circular, sequence.len());
+
+    let csv = render_csv_results_with_projection(&hits, SequenceTopology::Circular, sequence.len());
+    assert!(csv.contains("\n17,16,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
+
+    let family_csv = render_family_ranges_csv_with_projection(
+        &ranges,
+        SequenceTopology::Circular,
+        sequence.len(),
+    );
+    let family_line = family_csv.lines().nth(1).expect("family row");
+    let mut cols = family_line.split(',');
+    assert_eq!(cols.next(), Some("1"));
+    let start = cols.next().unwrap().parse::<usize>().unwrap();
+    let end = cols.next().unwrap().parse::<usize>().unwrap();
+    assert!(start <= sequence.len());
+    assert!(end <= sequence.len());
+    assert!(end < start);
 }

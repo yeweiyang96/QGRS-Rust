@@ -286,7 +286,8 @@ fn process_inline_sequence(
         consolidate_for_export(raw, include_overlap, scan.topology(), sequence_len);
     match format {
         OutputFormat::Csv => {
-            let csv = qgrs::render_csv_results(&results);
+            let csv =
+                qgrs::render_csv_results_with_projection(&results, scan.topology(), sequence_len);
             if let Some(path) = output_path.as_ref() {
                 fs::write(path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?
             } else {
@@ -299,15 +300,26 @@ fn process_inline_sequence(
                 .ok_or_else(|| usage("--output is required when --format parquet"))?;
             let file = fs::File::create(path)
                 .map_err(|err| format!("failed to create {path:?}: {err}"))?;
-            qgrs::write_parquet_results(&results, file)
-                .map_err(|err| format!("failed to write parquet: {err}"))?;
+            qgrs::write_parquet_results_with_projection(
+                &results,
+                file,
+                scan.topology(),
+                sequence_len,
+            )
+            .map_err(|err| format!("failed to write parquet: {err}"))?;
         }
     }
     if include_overlap {
         let base = output_path
             .as_ref()
             .expect("overlap outputs require an explicit --output path");
-        write_overlap_exports(base, raw_hits.as_ref().unwrap(), &family_ranges)?;
+        write_overlap_exports(
+            base,
+            raw_hits.as_ref().unwrap(),
+            &family_ranges,
+            scan.topology(),
+            sequence_len,
+        )?;
     }
     Ok(())
 }
@@ -355,23 +367,37 @@ fn process_fasta_file(
                     // );
                     match format {
                         OutputFormat::Csv => {
-                            let csv = qgrs::render_csv_results(&results);
+                            let csv = qgrs::render_csv_results_with_projection(
+                                &results,
+                                scan.topology(),
+                                sequence_len,
+                            );
                             fs::write(&filepath, csv)
                                 .map_err(|err| format!("failed to write {filepath:?}: {err}"))?
                         }
                         OutputFormat::Parquet => {
                             let file = fs::File::create(&filepath)
                                 .map_err(|err| format!("failed to create {filepath:?}: {err}"))?;
-                            qgrs::write_parquet_results(&results, file).map_err(|err| {
-                                format!("failed to write parquet for {}: {err}", name)
-                            })?
+                            qgrs::write_parquet_results_with_projection(
+                                &results,
+                                file,
+                                scan.topology(),
+                                sequence_len,
+                            )
+                            .map_err(|err| format!("failed to write parquet for {}: {err}", name))?
                         }
                     }
                     if include_overlap {
                         let raw_hits = raw_hits
                             .as_ref()
                             .expect("raw hits must be captured when overlap is requested");
-                        write_overlap_exports(&filepath, raw_hits, &family_ranges)?;
+                        write_overlap_exports(
+                            &filepath,
+                            raw_hits,
+                            &family_ranges,
+                            scan.topology(),
+                            sequence_len,
+                        )?;
                     }
                     Ok(())
                 },
@@ -380,25 +406,34 @@ fn process_fasta_file(
         InputMode::Stream => {
             let mut processed = 0usize;
             if include_overlap {
-                qgrs::stream::process_fasta_stream_with_limits_overlap_topology(
+                qgrs::stream::process_fasta_stream_with_limits_overlap_topology_and_len(
                     &path,
                     scan.min_tetrads(),
                     scan.min_score(),
                     scan.limits(),
                     scan.topology(),
-                    |name, mut stream_results| {
+                    |name, mut stream_results, sequence_len| {
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
                         let filepath = dir.join(&filename);
                         match format {
                             OutputFormat::Csv => {
-                                let csv = qgrs::render_csv_results(&stream_results.hits);
+                                let csv = qgrs::render_csv_results_with_projection(
+                                    &stream_results.hits,
+                                    scan.topology(),
+                                    sequence_len,
+                                );
                                 fs::write(&filepath, csv)?;
                             }
                             OutputFormat::Parquet => {
                                 let file = fs::File::create(&filepath)?;
-                                qgrs::write_parquet_results(&stream_results.hits, file)
-                                    .map_err(|err| io::Error::other(err.to_string()))?;
+                                qgrs::write_parquet_results_with_projection(
+                                    &stream_results.hits,
+                                    file,
+                                    scan.topology(),
+                                    sequence_len,
+                                )
+                                .map_err(|err| io::Error::other(err.to_string()))?;
                             }
                         }
                         let raw_hits = stream_results
@@ -406,32 +441,47 @@ fn process_fasta_file(
                             .take()
                             .expect("raw hits missing from overlap stream results");
 
-                        write_overlap_exports(&filepath, &raw_hits, &stream_results.family_ranges)
-                            .map_err(io::Error::other)?;
+                        write_overlap_exports(
+                            &filepath,
+                            &raw_hits,
+                            &stream_results.family_ranges,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
                         Ok(())
                     },
                 )
                 .map_err(|err| format!("failed to process {path:?}: {err}"))?;
             } else {
-                qgrs::stream::process_fasta_stream_with_limits_topology(
+                qgrs::stream::process_fasta_stream_with_limits_topology_and_len(
                     &path,
                     scan.min_tetrads(),
                     scan.min_score(),
                     scan.limits(),
                     scan.topology(),
-                    |name, results| {
+                    |name, results, sequence_len| {
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
                         let filepath = dir.join(&filename);
                         match format {
                             OutputFormat::Csv => {
-                                let csv = qgrs::render_csv_results(&results);
+                                let csv = qgrs::render_csv_results_with_projection(
+                                    &results,
+                                    scan.topology(),
+                                    sequence_len,
+                                );
                                 fs::write(&filepath, csv)?;
                             }
                             OutputFormat::Parquet => {
                                 let file = fs::File::create(&filepath)?;
-                                qgrs::write_parquet_results(&results, file)
-                                    .map_err(|err| io::Error::other(err.to_string()))?;
+                                qgrs::write_parquet_results_with_projection(
+                                    &results,
+                                    file,
+                                    scan.topology(),
+                                    sequence_len,
+                                )
+                                .map_err(|err| io::Error::other(err.to_string()))?;
                             }
                         }
                         Ok(())
@@ -507,13 +557,16 @@ fn write_overlap_exports(
     base: &Path,
     raw_hits: &[G4],
     family_ranges: &[(usize, usize)],
+    topology: SequenceTopology,
+    sequence_len: usize,
 ) -> Result<(), String> {
-    let overlap_csv = qgrs::render_csv_results(raw_hits);
+    let overlap_csv = qgrs::render_csv_results_with_projection(raw_hits, topology, sequence_len);
     let overlap_path = overlap_csv_path(base);
     fs::write(&overlap_path, overlap_csv)
         .map_err(|err| format!("failed to write {overlap_path:?}: {err}"))?;
 
-    let family_csv = qgrs::render_family_ranges_csv(family_ranges);
+    let family_csv =
+        qgrs::render_family_ranges_csv_with_projection(family_ranges, topology, sequence_len);
     let family_path = family_csv_path(base);
     fs::write(&family_path, family_csv)
         .map_err(|err| format!("failed to write {family_path:?}: {err}"))?;
@@ -573,6 +626,7 @@ impl OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn default_limits_are_valid() {
@@ -622,18 +676,143 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn circular_cli_outputs_map_coordinates_back_to_ring() {
+        let base = unique_test_path("qgrs_circular_cli");
+        let output = base.with_extension("csv");
+        let output_str = output.to_string_lossy().into_owned();
+        let result = run_with_owned_args(vec![
+            "--sequence".to_string(),
+            "GAGGGGAGGGGAGGGGGGG".to_string(),
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--circular".to_string(),
+            "--overlap".to_string(),
+            "--output".to_string(),
+            output_str.clone(),
+        ]);
+        assert!(result.is_ok());
+
+        let csv = fs::read_to_string(&output).expect("main output");
+        assert!(csv.contains("\n17,16,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
+
+        let overlap = fs::read_to_string(overlap_csv_path(&output)).expect("overlap output");
+        for line in overlap.lines().skip(1) {
+            let mut cols = line.split(',');
+            let start = cols.next().unwrap().parse::<usize>().unwrap();
+            let end = cols.next().unwrap().parse::<usize>().unwrap();
+            assert!(start <= 19);
+            assert!(end <= 19);
+        }
+        assert!(overlap.lines().skip(1).any(|line| {
+            let mut cols = line.split(',');
+            let start = cols.next().unwrap().parse::<usize>().unwrap();
+            let end = cols.next().unwrap().parse::<usize>().unwrap();
+            end < start
+        }));
+
+        let family = fs::read_to_string(family_csv_path(&output)).expect("family output");
+        let family_line = family.lines().nth(1).expect("family row");
+        let mut cols = family_line.split(',');
+        assert_eq!(cols.next(), Some("1"));
+        let start = cols.next().unwrap().parse::<usize>().unwrap();
+        let end = cols.next().unwrap().parse::<usize>().unwrap();
+        assert!(start <= 19);
+        assert!(end <= 19);
+        assert!(end < start);
+
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_file(overlap_csv_path(&output));
+        let _ = fs::remove_file(family_csv_path(&output));
+    }
+
+    #[test]
+    fn circular_file_outputs_match_between_mmap_and_stream() {
+        let fasta = unique_test_path("qgrs_circular_modes").with_extension("fa");
+        fs::write(
+            &fasta,
+            b">chr1\nGAGGGGAGGGGAGGGGGGG\n>chr2\nGGGCGGGGAGGGGAGGGGAG\n",
+        )
+        .unwrap();
+        let mmap_dir = unique_test_path("qgrs_mmap_out");
+        let stream_dir = unique_test_path("qgrs_stream_out");
+        fs::create_dir_all(&mmap_dir).unwrap();
+        fs::create_dir_all(&stream_dir).unwrap();
+
+        let fasta_str = fasta.to_string_lossy().into_owned();
+        let mmap_dir_str = mmap_dir.to_string_lossy().into_owned();
+        let stream_dir_str = stream_dir.to_string_lossy().into_owned();
+
+        let mmap_result = run_with_owned_args(vec![
+            "--file".to_string(),
+            fasta_str.clone(),
+            "--mode".to_string(),
+            "mmap".to_string(),
+            "--output-dir".to_string(),
+            mmap_dir_str,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--circular".to_string(),
+            "--overlap".to_string(),
+        ]);
+        assert!(mmap_result.is_ok());
+
+        let stream_result = run_with_owned_args(vec![
+            "--file".to_string(),
+            fasta_str,
+            "--mode".to_string(),
+            "stream".to_string(),
+            "--output-dir".to_string(),
+            stream_dir_str,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--circular".to_string(),
+            "--overlap".to_string(),
+        ]);
+        assert!(stream_result.is_ok());
+
+        for filename in [
+            "chr1.csv",
+            "chr1.overlap.csv",
+            "chr1.family.csv",
+            "chr2.csv",
+            "chr2.overlap.csv",
+            "chr2.family.csv",
+        ] {
+            let mmap_contents = fs::read_to_string(mmap_dir.join(filename)).unwrap();
+            let stream_contents = fs::read_to_string(stream_dir.join(filename)).unwrap();
+            assert_eq!(mmap_contents, stream_contents, "mismatch for {filename}");
+        }
+
+        let _ = fs::remove_file(&fasta);
+        let _ = fs::remove_dir_all(&mmap_dir);
+        let _ = fs::remove_dir_all(&stream_dir);
+    }
+
     fn run_with_args<const N: usize>(args: [&'static str; N]) -> Result<(), String> {
+        let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        run_with_owned_args(args)
+    }
+
+    fn run_with_owned_args(args: Vec<String>) -> Result<(), String> {
         let mut argv = vec![String::from("qgrs")];
-        argv.extend(args.iter().map(|a| a.to_string()));
+        argv.extend(args);
         let original = env::args_os().collect::<Vec<_>>();
         let _ = original;
         run_env(argv.into_iter().skip(1))
     }
 
-    #[test]
-    fn test() {
-        let result = run_with_args(["--file", "big.txt", "--output-dir", "output/test"]);
-        // assert!(result.is_err());
-        print!("{:?}", result);
+    fn unique_test_path(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nonce))
     }
 }

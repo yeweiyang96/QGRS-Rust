@@ -7,27 +7,53 @@ use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::errors::ParquetError;
 
+use crate::qgrs::data::SequenceTopology;
 use crate::qgrs::search::G4;
 
 pub fn render_family_ranges_csv(ranges: &[(usize, usize)]) -> String {
+    render_family_ranges_csv_with_projection(ranges, SequenceTopology::Linear, 0)
+}
+
+pub fn render_family_ranges_csv_with_projection(
+    ranges: &[(usize, usize)],
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> String {
     let mut out = String::from("family_index,start,end\n");
     for (index, (start, end)) in ranges.iter().enumerate() {
-        out.push_str(&format!("{},{},{}\n", index + 1, start, end));
+        out.push_str(&format!(
+            "{},{},{}\n",
+            index + 1,
+            start,
+            projected_end(*end, topology, sequence_len)
+        ));
     }
     out
 }
 
 pub fn render_csv_results(g4s: &[G4]) -> String {
-    render_csv(g4s)
+    render_csv_results_with_projection(g4s, SequenceTopology::Linear, 0)
 }
 
-fn render_csv(g4s: &[G4]) -> String {
+pub fn render_csv_results_with_projection(
+    g4s: &[G4],
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> String {
     let mut out = String::from("start,end,length,tetrads,y1,y2,y3,gscore,sequence\n");
     for g4 in g4s {
         let sequence_field = escape_csv_field(g4.sequence());
         out.push_str(&format!(
             "{},{},{},{},{},{},{},{},{}\n",
-            g4.start, g4.end, g4.length, g4.tetrads, g4.y1, g4.y2, g4.y3, g4.gscore, sequence_field
+            g4.start,
+            projected_end(g4.end, topology, sequence_len),
+            g4.length,
+            g4.tetrads,
+            g4.y1,
+            g4.y2,
+            g4.y3,
+            g4.gscore,
+            sequence_field
         ));
     }
     out
@@ -93,12 +119,23 @@ pub fn write_parquet_results<W: Write + Send + 'static>(
     g4s: &[G4],
     writer: W,
 ) -> Result<(), ExportError> {
-    write_parquet_from_results(g4s, writer)
+    write_parquet_results_with_projection(g4s, writer, SequenceTopology::Linear, 0)
+}
+
+pub fn write_parquet_results_with_projection<W: Write + Send + 'static>(
+    g4s: &[G4],
+    writer: W,
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> Result<(), ExportError> {
+    write_parquet_from_results(g4s, writer, topology, sequence_len)
 }
 
 fn write_parquet_from_results<W: Write + Send + 'static>(
     g4s: &[G4],
     writer: W,
+    topology: SequenceTopology,
+    sequence_len: usize,
 ) -> Result<(), ExportError> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("start", DataType::UInt64, false),
@@ -113,7 +150,10 @@ fn write_parquet_from_results<W: Write + Send + 'static>(
     ]));
 
     let starts: Vec<u64> = g4s.iter().map(|g| g.start as u64).collect();
-    let ends: Vec<u64> = g4s.iter().map(|g| g.end as u64).collect();
+    let ends: Vec<u64> = g4s
+        .iter()
+        .map(|g| projected_end(g.end, topology, sequence_len) as u64)
+        .collect();
     let lengths: Vec<u64> = g4s.iter().map(|g| g.length as u64).collect();
     let tetrads: Vec<u64> = g4s.iter().map(|g| g.tetrads as u64).collect();
     let y1s: Vec<i32> = g4s.iter().map(|g| g.y1).collect();
@@ -139,4 +179,11 @@ fn write_parquet_from_results<W: Write + Send + 'static>(
     arrow_writer.write(&batch)?;
     arrow_writer.close()?;
     Ok(())
+}
+
+fn projected_end(end: usize, topology: SequenceTopology, sequence_len: usize) -> usize {
+    if !topology.is_circular() || sequence_len == 0 || end == 0 {
+        return end;
+    }
+    ((end - 1) % sequence_len) + 1
 }
