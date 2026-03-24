@@ -28,9 +28,10 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 - Rust scanner mirrors the legacy scoring heuristics while benefiting from zero-copy iterators and Rayon parallelism.
 - Memory-mapped (`mmap`) and streaming (`stream`) readers let you pick the best strategy per dataset.
 - Optional `--circular` topology support treats each sequence/chromosome as a ring for wrap-around G4 detection.
+- Optional `--revcomp` mode scans reverse-complement strands and emits separate `.revcomp.<format>` files with coordinates mapped back to the forward strand.
 - CSV/Parquet exporters always report 1-based, inclusive coordinates for genome-browser compatibility.
 - CLI validation enforces sane tetrad, loop, and window settings to avoid silent misconfiguration.
-- Optional `--overlap` flag writes both the sorted raw hits and post-consolidation family ranges alongside your primary export for diffing and debugging.
+- Optional `--overlap` flag writes both the sorted raw hits and post-consolidation family ranges alongside your primary export, following `--format` (`.csv` or `.parquet`).
 
 ## 🧰 Requirements
 
@@ -74,7 +75,7 @@ target/release/qgrs --help
 
 ## 🧪 Usage
 
-`qgrs` accepts either an inline sequence (`--sequence`) or an input file (`--file`). FASTA inputs are split per chromosome header, and each slice is processed independently. If you provide a file, choose either the memory-mapped (`mmap`) or buffered streaming (`stream`) pipeline with `--mode`. Pass `--circular` when the sequence/chromosome should be scanned as a circular molecule (wrap-around hits allowed). All examples below assume you already built the release binary (`target/release/qgrs`) or installed it as `qgrs`; use `cargo run --release --bin qgrs -- …` only when iterating locally. The banner below comes straight from `src/bin/qgrs.rs` so it always matches the binary.
+`qgrs` accepts either an inline sequence (`--sequence`) or an input file (`--file`). FASTA inputs are split per chromosome header, and each slice is processed independently. If you provide a file, choose either the memory-mapped (`mmap`) or buffered streaming (`stream`) pipeline with `--mode`. Pass `--circular` when the sequence/chromosome should be scanned as a circular molecule (wrap-around hits allowed), and pass `--revcomp` to also scan the reverse-complement strand into separate output files. All examples below assume you already built the release binary (`target/release/qgrs`) or installed it as `qgrs`; use `cargo run --release --bin qgrs -- …` only when iterating locally. The banner below comes straight from `src/bin/qgrs.rs` so it always matches the binary.
 
 ```
 Usage: qgrs -- [--sequence <SEQ> | --file <PATH>] [options]
@@ -89,7 +90,8 @@ Options:
    --output <PATH>        Destination file when using --sequence (required for parquet)
    --output-dir <DIR>     Directory for per-chromosome exports when using --file
    --mode <mmap|stream>   Input mode when using --file (default mmap)
-   --overlap              Also emit raw hits (.overlap.csv) + family ranges (.family.csv)
+   --overlap              Also emit raw hits (.overlap.<format>) + family ranges (.family.<format>)
+   --revcomp              Also scan reverse-complement and emit .revcomp.<format>
    --circular             Treat each sequence/chromosome as circular
    --help                 Show this message
 ```
@@ -141,6 +143,15 @@ target/release/qgrs \
    --sequence GAGGGGAGGGGAGGGGGGG \
    --min-tetrads 4 \
    --circular
+
+# 7. Emit both forward and reverse-complement outputs
+target/release/qgrs \
+   --file data/genome.fa \
+   --mode stream \
+   --output-dir ./qgrs_both_strands \
+   --format parquet \
+   --revcomp \
+   --overlap
 ```
 
 ### CLI reference
@@ -157,10 +168,11 @@ target/release/qgrs \
 | `--format <csv\|parquet>` | Output encoding. CSV defaults to stdout for inline sequences; Parquet requires a file/dir. | `csv`                    |
 | `--output <FILE\|- >`     | Single output file (or `-` for stdout) when scanning inline sequences.                     | stdout for CSV           |
 | `--output-dir <DIR>`      | Directory for per-chromosome files when reading FASTA/plain inputs.                        | _required with `--file`_ |
-| `--overlap`               | Emit `{base}.overlap.csv` (raw hits) and `{base}.family.csv` (family ranges) per output file. | off                      |
+| `--overlap`               | Emit `{base}.overlap.<format>` (raw hits) and `{base}.family.<format>` (family ranges) per output file. | off                      |
+| `--revcomp`               | Emit additional reverse-complement outputs `{base}.revcomp.<format>` with coordinates mapped back to forward-strand coordinates. | off                      |
 | `--circular`              | Treat each sequence/chromosome as circular; CLI exports map wrap-around hits back to ring coordinates, so `end` may be `< start`. | off                      |
 
-The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet.
+The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet. If `--revcomp` or `--overlap` is enabled for inline scans, `--output` is required so sidecar files can be named deterministically.
 
 ### Output schema
 
@@ -182,10 +194,22 @@ CSV output always includes the header `start,end,length,tetrads,y1,y2,y3,gscore,
 
 Pass `--overlap` to retain additional debugging artifacts for every output file:
 
-- **Raw hits**: `{base}.overlap.csv` mirrors the primary CSV schema but contains the full pre-consolidation hit list. This lets you diff against other implementations or inspect families before winners are picked.
-- **Family ranges**: `{base}.family.csv` lists `family_index,start,end` for each consolidated family, using the same 1-based inclusive coordinates. The index column reflects the order in which families were discovered.
+- **Raw hits**: `{base}.overlap.<format>` mirrors the primary result schema but contains the full pre-consolidation hit list. This lets you diff against other implementations or inspect families before winners are picked.
+- **Family ranges**: `{base}.family.<format>` lists `family_index,start,end` for each consolidated family, using the same 1-based inclusive coordinates. The index column reflects the order in which families were discovered.
 
-For inline scans you must also supply `--output`, because the overlap files reuse that base path. When scanning FASTA files, each chromosome inherits the sanitized filename that would have been written normally (e.g., `chr2.csv` → `chr2.csv.overlap.csv`). In streaming mode the extra files are flushed as soon as each chromosome finishes, so the memory footprint stays bounded even for gigantic inputs.
+For inline scans you must also supply `--output`, because the overlap files reuse that base path. When scanning FASTA files, each chromosome inherits the sanitized filename that would have been written normally (for example, `chr2.parquet` also writes `chr2.overlap.parquet` and `chr2.family.parquet`). In streaming mode the extra files are flushed as soon as each chromosome finishes, so the memory footprint stays bounded even for gigantic inputs.
+
+### Reverse-complement exports (`--revcomp`)
+
+Pass `--revcomp` to emit an additional result file for each primary output, with filename `{base}.revcomp.<format>`.
+
+- Reverse-complement scans use the same thresholds and topology settings as forward scans.
+- `start`/`end` in `.revcomp` outputs are mapped back to forward-strand coordinates:
+  - Linear: `start' = N - end_rc + 1`, `end' = N - start_rc + 1`
+  - Circular: project `end_rc` back to ring coordinates first, then apply the same mapping.
+- The `sequence` column in `.revcomp` outputs remains in reverse-complement scan direction (negative strand 5'→3').
+
+If `--overlap` is also enabled, revcomp sidecars are emitted too: `{base}.revcomp.overlap.<format>` and `{base}.revcomp.family.<format>`.
 
 ## Testing & QA
 

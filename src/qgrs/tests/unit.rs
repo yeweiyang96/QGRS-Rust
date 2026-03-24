@@ -5,7 +5,7 @@ use crate::qgrs::{
     InputMode, ScanLimits, SequenceTopology, consolidate_g4s, consolidate_g4s_with_topology,
     find_owned_bytes, find_owned_bytes_with_topology, load_sequences_from_path, render_csv_results,
     render_csv_results_with_projection, render_family_ranges_csv_with_projection,
-    write_parquet_results,
+    write_parquet_family_ranges, write_parquet_results,
 };
 
 use super::helpers::arc_from_sequence;
@@ -50,6 +50,17 @@ fn parquet_writer_emits_bytes() {
     let raw = find_owned_bytes(arc_from_sequence(sequence), 4, 17);
     let (results, _ranges) = consolidate_g4s(raw);
     write_parquet_results(&results, file).expect("parquet export");
+    let metadata = fs::metadata(&path).expect("metadata");
+    assert!(metadata.len() > 0);
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn family_parquet_writer_emits_bytes() {
+    let path = env::temp_dir().join("qgrs_family_parquet_test.parquet");
+    let file = fs::File::create(&path).expect("temp parquet file");
+    let ranges = vec![(1usize, 10usize), (20usize, 30usize)];
+    write_parquet_family_ranges(&ranges, file).expect("family parquet export");
     let metadata = fs::metadata(&path).expect("metadata");
     assert!(metadata.len() > 0);
     let _ = fs::remove_file(&path);

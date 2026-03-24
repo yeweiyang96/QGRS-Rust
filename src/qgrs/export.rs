@@ -131,6 +131,45 @@ pub fn write_parquet_results_with_projection<W: Write + Send + 'static>(
     write_parquet_from_results(g4s, writer, topology, sequence_len)
 }
 
+pub fn write_parquet_family_ranges<W: Write + Send + 'static>(
+    ranges: &[(usize, usize)],
+    writer: W,
+) -> Result<(), ExportError> {
+    write_parquet_family_ranges_with_projection(ranges, writer, SequenceTopology::Linear, 0)
+}
+
+pub fn write_parquet_family_ranges_with_projection<W: Write + Send + 'static>(
+    ranges: &[(usize, usize)],
+    writer: W,
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> Result<(), ExportError> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("family_index", DataType::UInt64, false),
+        Field::new("start", DataType::UInt64, false),
+        Field::new("end", DataType::UInt64, false),
+    ]));
+
+    let family_indices: Vec<u64> = (0..ranges.len()).map(|index| (index + 1) as u64).collect();
+    let starts: Vec<u64> = ranges.iter().map(|(start, _)| *start as u64).collect();
+    let ends: Vec<u64> = ranges
+        .iter()
+        .map(|(_, end)| projected_end(*end, topology, sequence_len) as u64)
+        .collect();
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from(family_indices)),
+        Arc::new(UInt64Array::from(starts)),
+        Arc::new(UInt64Array::from(ends)),
+    ];
+
+    let batch = RecordBatch::try_new(schema.clone(), columns)?;
+    let mut arrow_writer = ArrowWriter::try_new(writer, schema, None)?;
+    arrow_writer.write(&batch)?;
+    arrow_writer.close()?;
+    Ok(())
+}
+
 fn write_parquet_from_results<W: Write + Send + 'static>(
     g4s: &[G4],
     writer: W,

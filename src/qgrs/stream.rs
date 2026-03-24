@@ -122,6 +122,29 @@ where
     )
 }
 
+pub fn process_fasta_stream_with_limits_topology_and_sequence<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    mut on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, Vec<G4>, Vec<u8>) -> io::Result<()>,
+{
+    let file = File::open(path)?;
+    let reader = BufReader::with_capacity(1 << 20, file);
+    process_reader_with_limits_topology_and_sequence(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        topology,
+        &mut on_chromosome,
+    )
+}
+
 pub fn process_fasta_stream_with_limits_overlap<F>(
     path: &Path,
     min_tetrads: usize,
@@ -179,6 +202,29 @@ where
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
     process_reader_with_limits_overlap_topology_and_len(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        topology,
+        &mut on_chromosome,
+    )
+}
+
+pub fn process_fasta_stream_with_limits_overlap_topology_and_sequence<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    mut on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, StreamChromosomeResults, Vec<u8>) -> io::Result<()>,
+{
+    let file = File::open(path)?;
+    let reader = BufReader::with_capacity(1 << 20, file);
+    process_reader_with_limits_overlap_topology_and_sequence(
         reader,
         min_tetrads,
         min_score,
@@ -383,6 +429,75 @@ where
     }
 }
 
+fn process_reader_with_limits_topology_and_sequence<R, F>(
+    mut reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, Vec<G4>, Vec<u8>) -> io::Result<()>,
+{
+    let mut line = String::new();
+    let mut chrom_index = 0usize;
+    let mut current: Option<StreamChromosome> = None;
+
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.starts_with('>') {
+            if let Some(chrom) = current.take() {
+                let (name, results, sequence) = chrom.finish_with_sequence();
+                on_chromosome(name, results, sequence)?;
+            }
+            chrom_index += 1;
+            let name = parse_chrom_name(&line, chrom_index);
+            current = Some(StreamChromosome::new_with_sequence_capture(
+                name,
+                min_tetrads,
+                min_score,
+                limits,
+                topology,
+                true,
+            ));
+            continue;
+        }
+        if current.is_none() {
+            chrom_index += 1;
+            let fallback = format!("chromosome_{}", chrom_index);
+            current = Some(StreamChromosome::new_with_sequence_capture(
+                fallback,
+                min_tetrads,
+                min_score,
+                limits,
+                topology,
+                true,
+            ));
+        }
+        if let Some(chrom) = current.as_mut() {
+            for byte in line.bytes() {
+                if byte.is_ascii_whitespace() {
+                    continue;
+                }
+                chrom.push_byte(byte.to_ascii_lowercase());
+            }
+        }
+    }
+
+    if let Some(chrom) = current {
+        let (name, results, sequence) = chrom.finish_with_sequence();
+        on_chromosome(name, results, sequence)?;
+        Ok(chrom_index.max(1))
+    } else {
+        Ok(0)
+    }
+}
+
 pub fn process_reader_with_limits_overlap<R, F>(
     reader: R,
     min_tetrads: usize,
@@ -538,9 +653,79 @@ where
     }
 }
 
+fn process_reader_with_limits_overlap_topology_and_sequence<R, F>(
+    mut reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, StreamChromosomeResults, Vec<u8>) -> io::Result<()>,
+{
+    let mut line = String::new();
+    let mut chrom_index = 0usize;
+    let mut current: Option<StreamChromosome> = None;
+
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.starts_with('>') {
+            if let Some(chrom) = current.take() {
+                let (name, results, sequence) = chrom.finish_with_overlap_and_sequence();
+                on_chromosome(name, results, sequence)?;
+            }
+            chrom_index += 1;
+            let name = parse_chrom_name(&line, chrom_index);
+            current = Some(StreamChromosome::new_with_sequence_capture(
+                name,
+                min_tetrads,
+                min_score,
+                limits,
+                topology,
+                true,
+            ));
+            continue;
+        }
+        if current.is_none() {
+            chrom_index += 1;
+            let fallback = format!("chromosome_{}", chrom_index);
+            current = Some(StreamChromosome::new_with_sequence_capture(
+                fallback,
+                min_tetrads,
+                min_score,
+                limits,
+                topology,
+                true,
+            ));
+        }
+        if let Some(chrom) = current.as_mut() {
+            for byte in line.bytes() {
+                if byte.is_ascii_whitespace() {
+                    continue;
+                }
+                chrom.push_byte(byte.to_ascii_lowercase());
+            }
+        }
+    }
+
+    if let Some(chrom) = current {
+        let (name, results, sequence) = chrom.finish_with_overlap_and_sequence();
+        on_chromosome(name, results, sequence)?;
+        Ok(chrom_index.max(1))
+    } else {
+        Ok(0)
+    }
+}
+
 struct StreamChromosome {
     name: String,
     scheduler: StreamChunkScheduler,
+    captured_sequence: Option<Vec<u8>>,
 }
 
 impl StreamChromosome {
@@ -551,13 +736,28 @@ impl StreamChromosome {
         limits: ScanLimits,
         topology: SequenceTopology,
     ) -> Self {
+        Self::new_with_sequence_capture(name, min_tetrads, min_score, limits, topology, false)
+    }
+
+    fn new_with_sequence_capture(
+        name: String,
+        min_tetrads: usize,
+        min_score: i32,
+        limits: ScanLimits,
+        topology: SequenceTopology,
+        capture_sequence: bool,
+    ) -> Self {
         Self {
             name,
             scheduler: StreamChunkScheduler::new(min_tetrads, min_score, limits, topology),
+            captured_sequence: capture_sequence.then(Vec::new),
         }
     }
 
     fn push_byte(&mut self, byte: u8) {
+        if let Some(sequence) = self.captured_sequence.as_mut() {
+            sequence.push(byte);
+        }
         self.scheduler.push_byte(byte);
     }
 
@@ -570,6 +770,12 @@ impl StreamChromosome {
         let sequence_len = self.scheduler.sequence_len();
         let results = self.scheduler.finish();
         (self.name, results, sequence_len)
+    }
+
+    fn finish_with_sequence(self) -> (String, Vec<G4>, Vec<u8>) {
+        let sequence = self.captured_sequence.unwrap_or_default();
+        let results = self.scheduler.finish();
+        (self.name, results, sequence)
     }
 
     fn finish_with_overlap(self) -> (String, StreamChromosomeResults) {
@@ -588,6 +794,20 @@ impl StreamChromosome {
         let sequence_len = self.scheduler.sequence_len();
         let (name, results) = self.finish_with_overlap();
         (name, results, sequence_len)
+    }
+
+    fn finish_with_overlap_and_sequence(self) -> (String, StreamChromosomeResults, Vec<u8>) {
+        let sequence = self.captured_sequence.unwrap_or_default();
+        let (hits, ranges, raw_hits) = self.scheduler.finish_with_overlap();
+        (
+            self.name,
+            StreamChromosomeResults {
+                hits,
+                family_ranges: ranges,
+                raw_hits: Some(raw_hits),
+            },
+            sequence,
+        )
     }
 }
 
