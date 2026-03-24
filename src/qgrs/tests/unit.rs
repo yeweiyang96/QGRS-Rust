@@ -1,5 +1,10 @@
 use std::env;
 use std::fs;
+use std::io::Write;
+use std::path::Path;
+
+use flate2::Compression;
+use flate2::write::GzEncoder;
 
 use crate::qgrs::{
     InputMode, ScanLimits, SequenceTopology, consolidate_g4s, consolidate_g4s_with_topology,
@@ -93,6 +98,39 @@ fn load_sequences_mmap_mode_splits_chromosomes() {
 }
 
 #[test]
+fn load_sequences_stream_mode_reads_gzip_fasta() {
+    let path = env::temp_dir().join("qgrs_stream_input.magic");
+    write_gzip(&path, b">chr1 description\nGGGG\nAC\n>chr2\nTTTT\n");
+    let seqs = load_sequences_from_path(&path, InputMode::Stream).unwrap();
+    assert_eq!(seqs.len(), 2);
+    assert_eq!(seqs[0].name(), "chr1");
+    assert_eq!(seqs[0].as_uppercase_string(), "GGGGAC");
+    assert_eq!(seqs[1].name(), "chr2");
+    assert_eq!(seqs[1].as_uppercase_string(), "TTTT");
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn load_sequences_mmap_mode_reads_gzip_fasta_matching_plain() {
+    let plain_path = env::temp_dir().join("qgrs_mmap_plain_input.fa");
+    let gz_path = env::temp_dir().join("qgrs_mmap_plain_input.magic");
+    let fasta = b">chr1\r\nGGGG\r\nAC\r\n>chrX\r\nCCCC\r\n";
+    fs::write(&plain_path, fasta).unwrap();
+    write_gzip(&gz_path, fasta);
+
+    let plain = load_sequences_from_path(&plain_path, InputMode::Mmap).unwrap();
+    let gzip = load_sequences_from_path(&gz_path, InputMode::Mmap).unwrap();
+    assert_eq!(plain.len(), gzip.len());
+    for (lhs, rhs) in plain.iter().zip(gzip.iter()) {
+        assert_eq!(lhs.name(), rhs.name());
+        assert_eq!(lhs.as_uppercase_string(), rhs.as_uppercase_string());
+    }
+
+    fs::remove_file(&plain_path).unwrap();
+    fs::remove_file(&gz_path).unwrap();
+}
+
+#[test]
 fn circular_mode_finds_wraparound_hit_when_linear_does_not() {
     let sequence = "GAGGGGAGGGGAGGGGGGG";
     let arc = arc_from_sequence(sequence);
@@ -169,4 +207,11 @@ fn circular_projected_csv_maps_end_back_to_ring() {
     assert!(start <= sequence.len());
     assert!(end <= sequence.len());
     assert!(end < start);
+}
+
+fn write_gzip(path: &Path, bytes: &[u8]) {
+    let file = fs::File::create(path).expect("create gzip file");
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    encoder.write_all(bytes).expect("write gzip data");
+    encoder.finish().expect("finish gzip");
 }

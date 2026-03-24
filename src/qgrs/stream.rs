@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -8,8 +7,8 @@ use rayon::spawn;
 
 use super::{
     G4, ScanLimits, SequenceTopology, chunk_size_for_limits, compute_chunk_overlap,
-    consolidate_g4s_with_topology, find_raw_bytes_no_chunking, parse_chrom_name,
-    retain_circular_raw_hits, shift_g4,
+    consolidate_g4s_with_topology, find_raw_bytes_no_chunking, input::open_input_reader,
+    parse_chrom_name, retain_circular_raw_hits, shift_g4,
 };
 
 pub struct StreamChromosomeResults {
@@ -87,8 +86,7 @@ pub fn process_fasta_stream_with_limits_topology<F>(
 where
     F: FnMut(String, Vec<G4>) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    let reader = open_input_reader(path)?;
     process_reader_with_limits_topology(
         reader,
         min_tetrads,
@@ -110,8 +108,7 @@ pub fn process_fasta_stream_with_limits_topology_and_len<F>(
 where
     F: FnMut(String, Vec<G4>, usize) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    let reader = open_input_reader(path)?;
     process_reader_with_limits_topology_and_len(
         reader,
         min_tetrads,
@@ -133,8 +130,7 @@ pub fn process_fasta_stream_with_limits_topology_and_sequence<F>(
 where
     F: FnMut(String, Vec<G4>, Vec<u8>) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    let reader = open_input_reader(path)?;
     process_reader_with_limits_topology_and_sequence(
         reader,
         min_tetrads,
@@ -176,8 +172,7 @@ pub fn process_fasta_stream_with_limits_overlap_topology<F>(
 where
     F: FnMut(String, StreamChromosomeResults) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    let reader = open_input_reader(path)?;
     process_reader_with_limits_overlap_topology(
         reader,
         min_tetrads,
@@ -199,8 +194,7 @@ pub fn process_fasta_stream_with_limits_overlap_topology_and_len<F>(
 where
     F: FnMut(String, StreamChromosomeResults, usize) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    let reader = open_input_reader(path)?;
     process_reader_with_limits_overlap_topology_and_len(
         reader,
         min_tetrads,
@@ -222,8 +216,7 @@ pub fn process_fasta_stream_with_limits_overlap_topology_and_sequence<F>(
 where
     F: FnMut(String, StreamChromosomeResults, Vec<u8>) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    let reader = open_input_reader(path)?;
     process_reader_with_limits_overlap_topology_and_sequence(
         reader,
         min_tetrads,
