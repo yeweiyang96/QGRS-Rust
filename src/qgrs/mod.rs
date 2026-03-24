@@ -17,7 +17,8 @@ pub use data::{
 };
 pub use export::{
     ExportError, render_csv_results, render_csv_results_with_projection, render_family_ranges_csv,
-    render_family_ranges_csv_with_projection, write_parquet_results,
+    render_family_ranges_csv_with_projection, write_parquet_family_ranges,
+    write_parquet_family_ranges_with_projection, write_parquet_results,
     write_parquet_results_with_projection,
 };
 pub use loaders::load_sequences_from_path;

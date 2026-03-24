@@ -39,6 +39,7 @@ where
     let mut output_dir: Option<PathBuf> = None;
     let mut mode = InputMode::Mmap;
     let mut include_overlap = false;
+    let mut include_revcomp = false;
     let mut circular = false;
 
     while let Some(arg) = args.next() {
@@ -123,6 +124,9 @@ where
             "--overlap" => {
                 include_overlap = true;
             }
+            "--revcomp" => {
+                include_revcomp = true;
+            }
             "--circular" => {
                 circular = true;
             }
@@ -165,7 +169,14 @@ where
             if output_dir.is_some() {
                 return Err(usage("--output-dir can only be used with --file"));
             }
-            process_inline_sequence(seq, format, output_path, scan, include_overlap)?;
+            process_inline_sequence(
+                seq,
+                format,
+                output_path,
+                scan,
+                include_overlap,
+                include_revcomp,
+            )?;
         }
         InputSpec::File(path) => {
             if output_path.is_some() {
@@ -173,7 +184,15 @@ where
                     "--output is only valid with --sequence; use --output-dir for --file",
                 ));
             }
-            process_fasta_file(path, mode, format, scan, output_dir, include_overlap)?;
+            process_fasta_file(
+                path,
+                mode,
+                format,
+                scan,
+                output_dir,
+                include_overlap,
+                include_revcomp,
+            )?;
         }
     }
     Ok(())
@@ -202,7 +221,10 @@ fn usage(reason: &str) -> String {
     msg.push_str("  --output-dir <DIR>  Directory for per-chromosome exports when using --file\n");
     msg.push_str("  --mode <mmap|stream> Input mode when using --file (default mmap)\n");
     msg.push_str(
-        "  --overlap            Emit raw hits (.overlap.csv) and family ranges (.family.csv)\n",
+        "  --overlap            Emit raw hits (.overlap.<format>) and family ranges (.family.<format>)\n",
+    );
+    msg.push_str(
+        "  --revcomp            Also scan reverse-complement and emit .revcomp.<format>\n",
     );
     msg.push_str("  --circular           Treat each sequence/chromosome as circular\n");
     msg.push_str("  --help               Show this message\n");
@@ -268,6 +290,7 @@ fn process_inline_sequence(
     output_path: Option<PathBuf>,
     scan: ScanConfig,
     include_overlap: bool,
+    include_revcomp: bool,
 ) -> Result<(), String> {
     let mut normalized = sequence.into_bytes();
     normalized.make_ascii_lowercase();
@@ -275,51 +298,65 @@ fn process_inline_sequence(
     if include_overlap && output_path.is_none() {
         return Err(usage("--overlap requires --output when using --sequence"));
     }
-    let raw = qgrs::find_owned_bytes_with_topology(
-        Arc::new(normalized),
-        scan.min_tetrads(),
-        scan.min_score(),
-        scan.limits(),
-        scan.topology(),
-    );
-    let (results, family_ranges, raw_hits) =
-        consolidate_for_export(raw, include_overlap, scan.topology(), sequence_len);
-    match format {
-        OutputFormat::Csv => {
-            let csv =
-                qgrs::render_csv_results_with_projection(&results, scan.topology(), sequence_len);
-            if let Some(path) = output_path.as_ref() {
-                fs::write(path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?
-            } else {
-                print!("{csv}");
-            }
-        }
-        OutputFormat::Parquet => {
-            let path = output_path
-                .as_ref()
-                .ok_or_else(|| usage("--output is required when --format parquet"))?;
-            let file = fs::File::create(path)
-                .map_err(|err| format!("failed to create {path:?}: {err}"))?;
-            qgrs::write_parquet_results_with_projection(
-                &results,
-                file,
-                scan.topology(),
-                sequence_len,
-            )
-            .map_err(|err| format!("failed to write parquet: {err}"))?;
-        }
+    if include_revcomp && output_path.is_none() {
+        return Err(usage("--revcomp requires --output when using --sequence"));
     }
+
+    let (results, family_ranges, raw_hits) = run_scan_for_export(
+        Arc::new(normalized.clone()),
+        scan,
+        include_overlap,
+        sequence_len,
+    );
+    write_primary_output(
+        output_path.as_deref(),
+        format,
+        &results,
+        scan.topology(),
+        sequence_len,
+    )?;
+
     if include_overlap {
         let base = output_path
             .as_ref()
             .expect("overlap outputs require an explicit --output path");
         write_overlap_exports(
             base,
+            format,
             raw_hits.as_ref().unwrap(),
             &family_ranges,
             scan.topology(),
             sequence_len,
         )?;
+    }
+
+    if include_revcomp {
+        let base = output_path
+            .as_ref()
+            .expect("revcomp outputs require an explicit --output path");
+        let (revcomp_results, revcomp_family_ranges, revcomp_raw_hits) =
+            run_revcomp_scan_for_export(&normalized, scan, include_overlap);
+        let revcomp_path = revcomp_output_path(base, format);
+        write_results_to_path(
+            &revcomp_path,
+            format,
+            &revcomp_results,
+            scan.topology(),
+            sequence_len,
+        )?;
+        if include_overlap {
+            let revcomp_raw_hits = revcomp_raw_hits
+                .as_ref()
+                .expect("revcomp raw hits must be captured when overlap is requested");
+            write_overlap_exports(
+                &revcomp_path,
+                format,
+                revcomp_raw_hits,
+                &revcomp_family_ranges,
+                scan.topology(),
+                sequence_len,
+            )?;
+        }
     }
     Ok(())
 }
@@ -331,6 +368,7 @@ fn process_fasta_file(
     scan: ScanConfig,
     output_dir: Option<PathBuf>,
     include_overlap: bool,
+    include_revcomp: bool,
 ) -> Result<(), String> {
     let dir = output_dir.ok_or_else(|| usage("--output-dir is required when --file is used"))?;
     fs::create_dir_all(&dir).map_err(|err| format!("failed to create {dir:?}: {err}"))?;
@@ -349,55 +387,54 @@ fn process_fasta_file(
             }
             chrom_outputs.into_par_iter().try_for_each(
                 |(chrom, filepath)| -> Result<(), String> {
-                    let (name, sequence) = chrom.into_parts();
+                    let (_name, sequence) = chrom.into_parts();
                     let sequence_len = sequence.len();
-                    let raw = qgrs::find_owned_bytes_with_topology(
-                        sequence,
-                        scan.min_tetrads(),
-                        scan.min_score(),
-                        scan.limits(),
-                        scan.topology(),
-                    );
                     let (results, family_ranges, raw_hits) =
-                        consolidate_for_export(raw, include_overlap, scan.topology(), sequence_len);
-                    // println!(
-                    //     "chromosome: {}, g4 consolidated hits: {}",
-                    //     name,
-                    //     results.len()
-                    // );
-                    match format {
-                        OutputFormat::Csv => {
-                            let csv = qgrs::render_csv_results_with_projection(
-                                &results,
-                                scan.topology(),
-                                sequence_len,
-                            );
-                            fs::write(&filepath, csv)
-                                .map_err(|err| format!("failed to write {filepath:?}: {err}"))?
-                        }
-                        OutputFormat::Parquet => {
-                            let file = fs::File::create(&filepath)
-                                .map_err(|err| format!("failed to create {filepath:?}: {err}"))?;
-                            qgrs::write_parquet_results_with_projection(
-                                &results,
-                                file,
-                                scan.topology(),
-                                sequence_len,
-                            )
-                            .map_err(|err| format!("failed to write parquet for {}: {err}", name))?
-                        }
-                    }
+                        run_scan_for_export(sequence.clone(), scan, include_overlap, sequence_len);
+                    write_results_to_path(
+                        &filepath,
+                        format,
+                        &results,
+                        scan.topology(),
+                        sequence_len,
+                    )?;
                     if include_overlap {
                         let raw_hits = raw_hits
                             .as_ref()
                             .expect("raw hits must be captured when overlap is requested");
                         write_overlap_exports(
                             &filepath,
+                            format,
                             raw_hits,
                             &family_ranges,
                             scan.topology(),
                             sequence_len,
                         )?;
+                    }
+                    if include_revcomp {
+                        let (revcomp_results, revcomp_ranges, revcomp_raw_hits) =
+                            run_revcomp_scan_for_export(sequence.as_slice(), scan, include_overlap);
+                        let revcomp_path = revcomp_output_path(&filepath, format);
+                        write_results_to_path(
+                            &revcomp_path,
+                            format,
+                            &revcomp_results,
+                            scan.topology(),
+                            sequence_len,
+                        )?;
+                        if include_overlap {
+                            let revcomp_raw_hits = revcomp_raw_hits.as_ref().expect(
+                                "revcomp raw hits must be captured when overlap is requested",
+                            );
+                            write_overlap_exports(
+                                &revcomp_path,
+                                format,
+                                revcomp_raw_hits,
+                                &revcomp_ranges,
+                                scan.topology(),
+                                sequence_len,
+                            )?;
+                        }
                     }
                     Ok(())
                 },
@@ -405,7 +442,104 @@ fn process_fasta_file(
         }
         InputMode::Stream => {
             let mut processed = 0usize;
-            if include_overlap {
+            if include_revcomp && include_overlap {
+                qgrs::stream::process_fasta_stream_with_limits_overlap_topology_and_sequence(
+                    &path,
+                    scan.min_tetrads(),
+                    scan.min_score(),
+                    scan.limits(),
+                    scan.topology(),
+                    |name, mut stream_results, sequence| {
+                        processed += 1;
+                        let sequence_len = sequence.len();
+                        let filename = next_output_filename(&name, format, &mut name_counts);
+                        let filepath = dir.join(&filename);
+                        write_results_to_path(
+                            &filepath,
+                            format,
+                            &stream_results.hits,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
+                        let raw_hits = stream_results
+                            .raw_hits
+                            .take()
+                            .expect("raw hits missing from overlap stream results");
+                        write_overlap_exports(
+                            &filepath,
+                            format,
+                            &raw_hits,
+                            &stream_results.family_ranges,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
+
+                        let (revcomp_results, revcomp_ranges, revcomp_raw_hits) =
+                            run_revcomp_scan_for_export(&sequence, scan, true);
+                        let revcomp_path = revcomp_output_path(&filepath, format);
+                        write_results_to_path(
+                            &revcomp_path,
+                            format,
+                            &revcomp_results,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
+                        let revcomp_raw_hits = revcomp_raw_hits
+                            .as_ref()
+                            .expect("revcomp raw hits must be captured when overlap is requested");
+                        write_overlap_exports(
+                            &revcomp_path,
+                            format,
+                            revcomp_raw_hits,
+                            &revcomp_ranges,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
+                        Ok(())
+                    },
+                )
+                .map_err(|err| format!("failed to process {path:?}: {err}"))?;
+            } else if include_revcomp {
+                qgrs::stream::process_fasta_stream_with_limits_topology_and_sequence(
+                    &path,
+                    scan.min_tetrads(),
+                    scan.min_score(),
+                    scan.limits(),
+                    scan.topology(),
+                    |name, results, sequence| {
+                        processed += 1;
+                        let sequence_len = sequence.len();
+                        let filename = next_output_filename(&name, format, &mut name_counts);
+                        let filepath = dir.join(&filename);
+                        write_results_to_path(
+                            &filepath,
+                            format,
+                            &results,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
+
+                        let (revcomp_results, _, _) =
+                            run_revcomp_scan_for_export(&sequence, scan, false);
+                        let revcomp_path = revcomp_output_path(&filepath, format);
+                        write_results_to_path(
+                            &revcomp_path,
+                            format,
+                            &revcomp_results,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
+                        Ok(())
+                    },
+                )
+                .map_err(|err| format!("failed to process {path:?}: {err}"))?;
+            } else if include_overlap {
                 qgrs::stream::process_fasta_stream_with_limits_overlap_topology_and_len(
                     &path,
                     scan.min_tetrads(),
@@ -416,26 +550,14 @@ fn process_fasta_file(
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
                         let filepath = dir.join(&filename);
-                        match format {
-                            OutputFormat::Csv => {
-                                let csv = qgrs::render_csv_results_with_projection(
-                                    &stream_results.hits,
-                                    scan.topology(),
-                                    sequence_len,
-                                );
-                                fs::write(&filepath, csv)?;
-                            }
-                            OutputFormat::Parquet => {
-                                let file = fs::File::create(&filepath)?;
-                                qgrs::write_parquet_results_with_projection(
-                                    &stream_results.hits,
-                                    file,
-                                    scan.topology(),
-                                    sequence_len,
-                                )
-                                .map_err(|err| io::Error::other(err.to_string()))?;
-                            }
-                        }
+                        write_results_to_path(
+                            &filepath,
+                            format,
+                            &stream_results.hits,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
                         let raw_hits = stream_results
                             .raw_hits
                             .take()
@@ -443,6 +565,7 @@ fn process_fasta_file(
 
                         write_overlap_exports(
                             &filepath,
+                            format,
                             &raw_hits,
                             &stream_results.family_ranges,
                             scan.topology(),
@@ -464,26 +587,14 @@ fn process_fasta_file(
                         processed += 1;
                         let filename = next_output_filename(&name, format, &mut name_counts);
                         let filepath = dir.join(&filename);
-                        match format {
-                            OutputFormat::Csv => {
-                                let csv = qgrs::render_csv_results_with_projection(
-                                    &results,
-                                    scan.topology(),
-                                    sequence_len,
-                                );
-                                fs::write(&filepath, csv)?;
-                            }
-                            OutputFormat::Parquet => {
-                                let file = fs::File::create(&filepath)?;
-                                qgrs::write_parquet_results_with_projection(
-                                    &results,
-                                    file,
-                                    scan.topology(),
-                                    sequence_len,
-                                )
-                                .map_err(|err| io::Error::other(err.to_string()))?;
-                            }
-                        }
+                        write_results_to_path(
+                            &filepath,
+                            format,
+                            &results,
+                            scan.topology(),
+                            sequence_len,
+                        )
+                        .map_err(io::Error::other)?;
                         Ok(())
                     },
                 )
@@ -553,46 +664,220 @@ fn consolidate_for_export(
     }
 }
 
+fn run_scan_for_export(
+    sequence: Arc<Vec<u8>>,
+    scan: ScanConfig,
+    capture_raw: bool,
+    sequence_len: usize,
+) -> ConsolidatedResults {
+    let raw = qgrs::find_owned_bytes_with_topology(
+        sequence,
+        scan.min_tetrads(),
+        scan.min_score(),
+        scan.limits(),
+        scan.topology(),
+    );
+    consolidate_for_export(raw, capture_raw, scan.topology(), sequence_len)
+}
+
+fn run_revcomp_scan_for_export(
+    forward_sequence: &[u8],
+    scan: ScanConfig,
+    capture_raw: bool,
+) -> ConsolidatedResults {
+    let sequence_len = forward_sequence.len();
+    let revcomp = Arc::new(reverse_complement_lowercase(forward_sequence));
+    let (hits, ranges, raw_hits) = run_scan_for_export(revcomp, scan, capture_raw, sequence_len);
+    let mapped_hits = map_revcomp_hits_to_forward(hits, scan.topology(), sequence_len);
+    let mapped_ranges = map_revcomp_ranges_to_forward(ranges, scan.topology(), sequence_len);
+    let mapped_raw_hits =
+        raw_hits.map(|hits| map_revcomp_hits_to_forward(hits, scan.topology(), sequence_len));
+    (mapped_hits, mapped_ranges, mapped_raw_hits)
+}
+
+fn reverse_complement_lowercase(sequence: &[u8]) -> Vec<u8> {
+    sequence
+        .iter()
+        .rev()
+        .map(|byte| match *byte {
+            b'a' | b'A' => b't',
+            b't' | b'T' | b'u' | b'U' => b'a',
+            b'c' | b'C' => b'g',
+            b'g' | b'G' => b'c',
+            b'n' | b'N' => b'n',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+fn map_revcomp_hits_to_forward(
+    mut hits: Vec<G4>,
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> Vec<G4> {
+    if sequence_len == 0 {
+        return hits;
+    }
+    for hit in &mut hits {
+        let (start, end) = map_revcomp_interval(hit.start, hit.end, topology, sequence_len);
+        hit.start = start;
+        hit.end = end;
+    }
+    hits.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+    hits
+}
+
+fn map_revcomp_ranges_to_forward(
+    mut ranges: Vec<(usize, usize)>,
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> Vec<(usize, usize)> {
+    if sequence_len == 0 {
+        return ranges;
+    }
+    for range in &mut ranges {
+        *range = map_revcomp_interval(range.0, range.1, topology, sequence_len);
+    }
+    ranges.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    ranges
+}
+
+fn map_revcomp_interval(
+    start_rc: usize,
+    end_rc: usize,
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> (usize, usize) {
+    let end_rc_projected = projected_end(end_rc, topology, sequence_len);
+    let start = sequence_len - end_rc_projected + 1;
+    let end = sequence_len - start_rc + 1;
+    (start, end)
+}
+
+fn projected_end(end: usize, topology: SequenceTopology, sequence_len: usize) -> usize {
+    if !topology.is_circular() || sequence_len == 0 || end == 0 {
+        return end;
+    }
+    ((end - 1) % sequence_len) + 1
+}
+
+fn write_primary_output(
+    output_path: Option<&Path>,
+    format: OutputFormat,
+    results: &[G4],
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> Result<(), String> {
+    match format {
+        OutputFormat::Csv => {
+            let csv = qgrs::render_csv_results_with_projection(results, topology, sequence_len);
+            if let Some(path) = output_path {
+                fs::write(path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?;
+            } else {
+                print!("{csv}");
+            }
+            Ok(())
+        }
+        OutputFormat::Parquet => {
+            let path =
+                output_path.ok_or_else(|| usage("--output is required when --format parquet"))?;
+            write_results_to_path(path, format, results, topology, sequence_len)
+        }
+    }
+}
+
+fn write_results_to_path(
+    path: &Path,
+    format: OutputFormat,
+    results: &[G4],
+    topology: SequenceTopology,
+    sequence_len: usize,
+) -> Result<(), String> {
+    match format {
+        OutputFormat::Csv => {
+            let csv = qgrs::render_csv_results_with_projection(results, topology, sequence_len);
+            fs::write(path, csv).map_err(|err| format!("failed to write {path:?}: {err}"))?;
+        }
+        OutputFormat::Parquet => {
+            let file = fs::File::create(path)
+                .map_err(|err| format!("failed to create {path:?}: {err}"))?;
+            qgrs::write_parquet_results_with_projection(results, file, topology, sequence_len)
+                .map_err(|err| format!("failed to write parquet {path:?}: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn write_overlap_exports(
     base: &Path,
+    format: OutputFormat,
     raw_hits: &[G4],
     family_ranges: &[(usize, usize)],
     topology: SequenceTopology,
     sequence_len: usize,
 ) -> Result<(), String> {
-    let overlap_csv = qgrs::render_csv_results_with_projection(raw_hits, topology, sequence_len);
-    let overlap_path = overlap_csv_path(base);
-    fs::write(&overlap_path, overlap_csv)
-        .map_err(|err| format!("failed to write {overlap_path:?}: {err}"))?;
+    let overlap_path = overlap_path(base, format);
+    let family_path = family_path(base, format);
+    match format {
+        OutputFormat::Csv => {
+            let overlap_csv =
+                qgrs::render_csv_results_with_projection(raw_hits, topology, sequence_len);
+            fs::write(&overlap_path, overlap_csv)
+                .map_err(|err| format!("failed to write {overlap_path:?}: {err}"))?;
 
-    let family_csv =
-        qgrs::render_family_ranges_csv_with_projection(family_ranges, topology, sequence_len);
-    let family_path = family_csv_path(base);
-    fs::write(&family_path, family_csv)
-        .map_err(|err| format!("failed to write {family_path:?}: {err}"))?;
+            let family_csv = qgrs::render_family_ranges_csv_with_projection(
+                family_ranges,
+                topology,
+                sequence_len,
+            );
+            fs::write(&family_path, family_csv)
+                .map_err(|err| format!("failed to write {family_path:?}: {err}"))?;
+        }
+        OutputFormat::Parquet => {
+            let overlap_file = fs::File::create(&overlap_path)
+                .map_err(|err| format!("failed to create {overlap_path:?}: {err}"))?;
+            qgrs::write_parquet_results_with_projection(
+                raw_hits,
+                overlap_file,
+                topology,
+                sequence_len,
+            )
+            .map_err(|err| format!("failed to write parquet {overlap_path:?}: {err}"))?;
+
+            let family_file = fs::File::create(&family_path)
+                .map_err(|err| format!("failed to create {family_path:?}: {err}"))?;
+            qgrs::write_parquet_family_ranges_with_projection(
+                family_ranges,
+                family_file,
+                topology,
+                sequence_len,
+            )
+            .map_err(|err| format!("failed to write parquet {family_path:?}: {err}"))?;
+        }
+    }
     Ok(())
 }
 
-fn overlap_csv_path(base: &Path) -> PathBuf {
-    append_suffix(base, ".overlap.csv")
+fn revcomp_output_path(base: &Path, format: OutputFormat) -> PathBuf {
+    append_output_suffix(base, ".revcomp", format)
 }
 
-fn family_csv_path(base: &Path) -> PathBuf {
-    append_suffix(base, ".family.csv")
+fn overlap_path(base: &Path, format: OutputFormat) -> PathBuf {
+    append_output_suffix(base, ".overlap", format)
 }
 
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-    // let mut os = path.as_os_str().to_os_string();
-    // os.push(suffix);
-    // PathBuf::from(os)
+fn family_path(base: &Path, format: OutputFormat) -> PathBuf {
+    append_output_suffix(base, ".family", format)
+}
+
+fn append_output_suffix(path: &Path, suffix: &str, format: OutputFormat) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("chromosome");
-    let mut name = String::from(stem);
-    name.push_str(suffix);
+    let name = format!("{stem}{suffix}.{}", format.extension());
     parent.join(name)
 }
 
@@ -663,6 +948,14 @@ mod tests {
     }
 
     #[test]
+    fn revcomp_requires_output_for_inline() {
+        let err = run_with_args(["--sequence", "GGGG", "--revcomp"]);
+        assert!(err.is_err());
+        let msg = err.unwrap_err();
+        assert!(msg.contains("--revcomp requires --output"));
+    }
+
+    #[test]
     fn circular_flag_is_supported_for_inline_scan() {
         let result = run_with_args([
             "--sequence",
@@ -698,7 +991,8 @@ mod tests {
         let csv = fs::read_to_string(&output).expect("main output");
         assert!(csv.contains("\n17,16,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
 
-        let overlap = fs::read_to_string(overlap_csv_path(&output)).expect("overlap output");
+        let overlap =
+            fs::read_to_string(overlap_path(&output, OutputFormat::Csv)).expect("overlap output");
         for line in overlap.lines().skip(1) {
             let mut cols = line.split(',');
             let start = cols.next().unwrap().parse::<usize>().unwrap();
@@ -713,7 +1007,8 @@ mod tests {
             end < start
         }));
 
-        let family = fs::read_to_string(family_csv_path(&output)).expect("family output");
+        let family =
+            fs::read_to_string(family_path(&output, OutputFormat::Csv)).expect("family output");
         let family_line = family.lines().nth(1).expect("family row");
         let mut cols = family_line.split(',');
         assert_eq!(cols.next(), Some("1"));
@@ -724,8 +1019,112 @@ mod tests {
         assert!(end < start);
 
         let _ = fs::remove_file(&output);
-        let _ = fs::remove_file(overlap_csv_path(&output));
-        let _ = fs::remove_file(family_csv_path(&output));
+        let _ = fs::remove_file(overlap_path(&output, OutputFormat::Csv));
+        let _ = fs::remove_file(family_path(&output, OutputFormat::Csv));
+    }
+
+    #[test]
+    fn parquet_overlap_and_family_follow_format() {
+        let base = unique_test_path("qgrs_parquet_sidecars");
+        let output = base.with_extension("parquet");
+        let output_str = output.to_string_lossy().into_owned();
+        let result = run_with_owned_args(vec![
+            "--sequence".to_string(),
+            "GGGGAGGGGAGGGGAGGGG".to_string(),
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--format".to_string(),
+            "parquet".to_string(),
+            "--overlap".to_string(),
+            "--output".to_string(),
+            output_str,
+        ]);
+        assert!(result.is_ok());
+
+        let overlap = overlap_path(&output, OutputFormat::Parquet);
+        let family = family_path(&output, OutputFormat::Parquet);
+        let overlap_meta = fs::metadata(&overlap).expect("overlap parquet output");
+        let family_meta = fs::metadata(&family).expect("family parquet output");
+        assert!(overlap_meta.len() > 0);
+        assert!(family_meta.len() > 0);
+
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_file(overlap);
+        let _ = fs::remove_file(family);
+    }
+
+    #[test]
+    fn revcomp_inline_outputs_mapped_coordinates() {
+        let base = unique_test_path("qgrs_revcomp_inline");
+        let output = base.with_extension("csv");
+        let output_str = output.to_string_lossy().into_owned();
+        // Build a sequence where only reverse-complement scan should find the canonical motif.
+        let motif = b"ttggggaggggaggggaggggaaaaaaa";
+        let sequence = String::from_utf8(reverse_complement_lowercase(motif)).unwrap();
+        let result = run_with_owned_args(vec![
+            "--sequence".to_string(),
+            sequence,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--revcomp".to_string(),
+            "--output".to_string(),
+            output_str,
+        ]);
+        assert!(result.is_ok());
+
+        let revcomp_output = revcomp_output_path(&output, OutputFormat::Csv);
+        let revcomp_csv = fs::read_to_string(&revcomp_output).expect("revcomp output");
+        assert!(revcomp_csv.contains("\n8,26,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
+
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_file(revcomp_output);
+    }
+
+    #[test]
+    fn revcomp_interval_mapping_for_circular_uses_projected_end() {
+        let (start, end) = map_revcomp_interval(17, 35, SequenceTopology::Circular, 19);
+        assert_eq!(start, 4);
+        assert_eq!(end, 3);
+        assert!(end < start);
+    }
+
+    #[test]
+    fn revcomp_with_overlap_outputs_revcomp_sidecars() {
+        let base = unique_test_path("qgrs_revcomp_overlap");
+        let output = base.with_extension("csv");
+        let output_str = output.to_string_lossy().into_owned();
+        let sequence = String::from_utf8(reverse_complement_lowercase(
+            b"ttggggaggggaggggaggggaaaaaaa",
+        ))
+        .unwrap();
+        let result = run_with_owned_args(vec![
+            "--sequence".to_string(),
+            sequence,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--revcomp".to_string(),
+            "--overlap".to_string(),
+            "--output".to_string(),
+            output_str,
+        ]);
+        assert!(result.is_ok());
+
+        let revcomp_output = revcomp_output_path(&output, OutputFormat::Csv);
+        assert!(fs::metadata(overlap_path(&revcomp_output, OutputFormat::Csv)).is_ok());
+        assert!(fs::metadata(family_path(&revcomp_output, OutputFormat::Csv)).is_ok());
+
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_file(overlap_path(&output, OutputFormat::Csv));
+        let _ = fs::remove_file(family_path(&output, OutputFormat::Csv));
+        let _ = fs::remove_file(&revcomp_output);
+        let _ = fs::remove_file(overlap_path(&revcomp_output, OutputFormat::Csv));
+        let _ = fs::remove_file(family_path(&revcomp_output, OutputFormat::Csv));
     }
 
     #[test]
@@ -784,6 +1183,79 @@ mod tests {
             "chr2.csv",
             "chr2.overlap.csv",
             "chr2.family.csv",
+        ] {
+            let mmap_contents = fs::read_to_string(mmap_dir.join(filename)).unwrap();
+            let stream_contents = fs::read_to_string(stream_dir.join(filename)).unwrap();
+            assert_eq!(mmap_contents, stream_contents, "mismatch for {filename}");
+        }
+
+        let _ = fs::remove_file(&fasta);
+        let _ = fs::remove_dir_all(&mmap_dir);
+        let _ = fs::remove_dir_all(&stream_dir);
+    }
+
+    #[test]
+    fn revcomp_file_outputs_match_between_mmap_and_stream() {
+        let fasta = unique_test_path("qgrs_revcomp_modes").with_extension("fa");
+        fs::write(
+            &fasta,
+            b">chr1\nAAACCCTCCCCTCCCCTCCCCAAA\n>chr2\nTTTTCCCCCTCCCCTCCCCTCCCCGG\n",
+        )
+        .unwrap();
+        let mmap_dir = unique_test_path("qgrs_revcomp_mmap_out");
+        let stream_dir = unique_test_path("qgrs_revcomp_stream_out");
+        fs::create_dir_all(&mmap_dir).unwrap();
+        fs::create_dir_all(&stream_dir).unwrap();
+
+        let fasta_str = fasta.to_string_lossy().into_owned();
+        let mmap_dir_str = mmap_dir.to_string_lossy().into_owned();
+        let stream_dir_str = stream_dir.to_string_lossy().into_owned();
+
+        let mmap_result = run_with_owned_args(vec![
+            "--file".to_string(),
+            fasta_str.clone(),
+            "--mode".to_string(),
+            "mmap".to_string(),
+            "--output-dir".to_string(),
+            mmap_dir_str,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--revcomp".to_string(),
+            "--overlap".to_string(),
+        ]);
+        assert!(mmap_result.is_ok());
+
+        let stream_result = run_with_owned_args(vec![
+            "--file".to_string(),
+            fasta_str,
+            "--mode".to_string(),
+            "stream".to_string(),
+            "--output-dir".to_string(),
+            stream_dir_str,
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--revcomp".to_string(),
+            "--overlap".to_string(),
+        ]);
+        assert!(stream_result.is_ok());
+
+        for filename in [
+            "chr1.csv",
+            "chr1.overlap.csv",
+            "chr1.family.csv",
+            "chr1.revcomp.csv",
+            "chr1.revcomp.overlap.csv",
+            "chr1.revcomp.family.csv",
+            "chr2.csv",
+            "chr2.overlap.csv",
+            "chr2.family.csv",
+            "chr2.revcomp.csv",
+            "chr2.revcomp.overlap.csv",
+            "chr2.revcomp.family.csv",
         ] {
             let mmap_contents = fs::read_to_string(mmap_dir.join(filename)).unwrap();
             let stream_contents = fs::read_to_string(stream_dir.join(filename)).unwrap();
