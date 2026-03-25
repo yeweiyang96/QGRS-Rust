@@ -207,6 +207,43 @@ impl G4Candidate {
 2. **均一性報酬**: loop 長が近いほど（`gavg` が小さいほど）スコアは高くなる
 3. **tetrad 加点**: tetrad が多い候補（3 以上）は追加ボーナスを得る
 
+#### 1.4.1 `--max-g4-length` が tetrads ごとに与える実際の影響
+
+QGRS-Rust において `--max-g4-length` は単なる出力フィルタではない。候補生成、loop 展開、可否判定、スコア計算のすべてに影響する。各候補内部で実際に使われる `max_length` は次の通りである:
+
+```text
+max_length(n) = min(legacy_cap(n), --max-g4-length)
+legacy_cap(n) = 30, n < 3 のとき
+legacy_cap(n) = 45, n >= 3 のとき
+```
+
+ここで `n` は候補の `tetrads` 値を表す。したがって、その影響はまず次のように要約できる:
+
+| tetrads | 候補が実際に使う `max_length` | `--max-g4-length` の効果 |
+| --- | --- | --- |
+| `n < 3` | `min(30, L)` | `L < 30` のときにのみ、2-tetrad 候補の許容全長、スコア上限、loop 展開空間が実際に縮小する |
+| `n >= 3` | `min(45, L)` | `L < 45` のときにのみ、3-tetrad 以上の候補の許容全長、スコア上限、loop 展開空間が実際に縮小する |
+
+ここで `L = --max-g4-length` である。既定値 `L=45` に注目すると、旧来の QGRS の段階的ルールは次の `tetrads -> 許容全長 -> スコアへの影響` の表に書き換えられる:
+
+| tetrads | 許容全長上限 | スコアへの影響 |
+| --- | --- | --- |
+| 2 | `<= 30` | `gscore = floor(21 - gavg)` |
+| 3 | `<= 45` | `gscore = floor(64 - gavg)` |
+| 4 | `<= 45` | `gscore = floor(84 - gavg)` |
+| 5 | `<= 45` | `gscore = floor(96 - gavg)` |
+| 6 | `<= 45` | `gscore = floor(100 - gavg)` |
+| 7 | `<= 45` | `gscore = floor(96 - gavg)` |
+| 8 | `<= 45` | `gscore = floor(84 - gavg)` |
+| 9 | `<= 45` | `gscore = floor(64 - gavg)` |
+| 10 | `<= 45` | `gscore = floor(36 - gavg)` |
+
+補足:
+- ここでの `gavg = (|y1-y2| + |y2-y3| + |y1-y3|) / 3` は、3 つの loop 長の不均衡に対するペナルティ項である。
+- 2-tetrad 候補は既定で `30 bp` の長さ予算しか持たないため、`--max-g4-length` を `45` より大きくしてもスコアや長さ判定はそれ以上緩和されない。
+- 3-tetrad 以上の候補は既定で `45 bp` の長さ予算を共有する。`--max-g4-length < 45` の場合は、スコア上限と loop 展開空間が同時に小さくなる。
+- `--max-g4-length` は seed 段階で列挙できる最大 tetrads も制限する: `max_tetrads_allowed = min(max_g_run, floor(L/4))`。そのため `L` が小さいと、高 tetrad 候補の一部は BFS 展開前に生成されなくなる。
+
 **典型的なスコア比較**（`max_length=45`, `min_tetrads=2`）:
 - `{tetrad=3, y1=5, y2=5, y3=5}`: `gmax=32`, `gavg=0`, `bonus=32` -> `score=64`
 - `{tetrad=3, y1=5, y2=2, y3=5}`: `gmax=32`, `gavg=2`, `bonus=32` -> `score=62`

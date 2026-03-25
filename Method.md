@@ -207,6 +207,43 @@ impl G4Candidate {
 2. **Uniformity reward**: the more similar the loop lengths are (smaller `gavg`), the higher the score
 3. **Tetrad bonus**: candidates with more tetrads (3+) receive an extra bonus
 
+#### 1.4.1 Practical effect of `--max-g4-length` across tetrad counts
+
+In QGRS-Rust, `--max-g4-length` is not just an output filter. It simultaneously affects candidate generation, loop expansion, viability checks, and scoring. The `max_length` actually used inside each candidate is:
+
+```text
+max_length(n) = min(legacy_cap(n), --max-g4-length)
+legacy_cap(n) = 30, when n < 3
+legacy_cap(n) = 45, when n >= 3
+```
+
+Here `n` is the candidate's `tetrads` value. Its effect can therefore be summarized first as:
+
+| tetrads | effective candidate `max_length` | effect of `--max-g4-length` |
+| --- | --- | --- |
+| `n < 3` | `min(30, L)` | Only when `L < 30` does it actually reduce the allowed total length, score ceiling, and loop expansion space for 2-tetrad candidates |
+| `n >= 3` | `min(45, L)` | Only when `L < 45` does it actually reduce the allowed total length, score ceiling, and loop expansion space for 3-tetrad and larger candidates |
+
+Here `L = --max-g4-length`. If we focus on the default setting `L=45`, the legacy QGRS tiered rule can be rewritten as the following `tetrads -> allowed total length -> score impact` table:
+
+| tetrads | allowed total length | score impact |
+| --- | --- | --- |
+| 2 | `<= 30` | `gscore = floor(21 - gavg)` |
+| 3 | `<= 45` | `gscore = floor(64 - gavg)` |
+| 4 | `<= 45` | `gscore = floor(84 - gavg)` |
+| 5 | `<= 45` | `gscore = floor(96 - gavg)` |
+| 6 | `<= 45` | `gscore = floor(100 - gavg)` |
+| 7 | `<= 45` | `gscore = floor(96 - gavg)` |
+| 8 | `<= 45` | `gscore = floor(84 - gavg)` |
+| 9 | `<= 45` | `gscore = floor(64 - gavg)` |
+| 10 | `<= 45` | `gscore = floor(36 - gavg)` |
+
+Notes:
+- Here `gavg = (|y1-y2| + |y2-y3| + |y1-y3|) / 3`, the penalty term for loop-length imbalance.
+- A 2-tetrad candidate gets only a `30 bp` length budget by default, so raising `--max-g4-length` above `45` does not further relax its scoring or length check.
+- Candidates with 3 tetrads or more share a default `45 bp` length budget; when `--max-g4-length < 45`, both their score ceiling and loop expansion space shrink together.
+- `--max-g4-length` also limits the maximum tetrad count that can be seeded: `max_tetrads_allowed = min(max_g_run, floor(L/4))`. When `L` is small, some high-tetrad candidates disappear before BFS expansion even starts.
+
 **Typical score comparison** (`max_length=45`, `min_tetrads=2`):
 - `{tetrad=3, y1=5, y2=5, y3=5}`: `gmax=32`, `gavg=0`, `bonus=32` -> `score=64`
 - `{tetrad=3, y1=5, y2=2, y3=5}`: `gmax=32`, `gavg=2`, `bonus=32` -> `score=62`

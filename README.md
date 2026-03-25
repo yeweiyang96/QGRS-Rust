@@ -16,6 +16,7 @@ QGRS-Rust is a ground-up Rust rewrite of the [freezer333/qgrs-cpp](https://githu
 - [🧪 Usage](#-usage)
   - [Quick recipes](#quick-recipes)
   - [CLI reference](#cli-reference)
+  - [How `--max-g4-length` works](#how---max-g4-length-works)
   - [Output schema](#output-schema)
 - [✅ Testing & QA](#-testing--qa)
 - [📊 Benchmarking tips](#-benchmarking-tips)
@@ -170,6 +171,24 @@ target/release/qgrs \
 | `--circular`              | Treat each sequence/chromosome as circular; wrap-around hits keep expanded coordinates in output, so `end` may exceed chromosome length `N`. | off                      |
 
 The CLI aborts with a descriptive error if incompatible parameters are provided (e.g., `--mode stream` without `--file`, or `--max-g-run < min-tetrads`). When scanning files you must pass `--output-dir`; when scanning inline sequences `--output` is optional for CSV but required for Parquet. If `--revcomp` or `--overlap` is enabled for inline scans, `--output` is required so sidecar files can be named deterministically.
+
+### How `--max-g4-length` works
+
+`--max-g4-length` affects more than final hit filtering. It participates in candidate seeding, loop expansion, viability checks, score calculation, chunk overlap, and circular wrap-around buffering.
+
+- Candidate seeding limits tetrads to `min(max_g_run, floor(max_g4_length / 4))`, so smaller values can eliminate high-tetrad candidates before BFS expansion starts.
+- Each candidate does not use `max_g4_length` directly. Instead, it uses `min(legacy_cap, max_g4_length)`, where `legacy_cap = 30` for `tetrads < 3` and `legacy_cap = 45` for `tetrads >= 3`.
+- As a result, increasing `--max-g4-length` above `30` does not further relax 2-tetrad scoring/length checks, and increasing it above `45` does not further relax 3+-tetrad scoring/length checks.
+- Decreasing `--max-g4-length` below those legacy caps reduces the allowed total motif length, narrows the loop search space, lowers the score ceiling, and can remove candidates entirely.
+
+With the default `--max-g4-length 45`, the effective per-candidate limits are:
+
+| tetrads | effective candidate `max_length` | practical effect |
+| --- | --- | --- |
+| `< 3` | `30` | 2-tetrad motifs are still scored and filtered against a 30 bp legacy cap |
+| `>= 3` | `45` | 3+-tetrad motifs use the 45 bp legacy cap |
+
+If you lower the flag, replace those values with `min(legacy_cap, --max-g4-length)`. For example, with `--max-g4-length 32`, 2-tetrad candidates still use `30`, while 3+-tetrad candidates drop from `45` to `32`.
 
 ### Output schema
 

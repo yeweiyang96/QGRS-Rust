@@ -206,6 +206,43 @@ impl G4Candidate {
 2. **均匀性奖励**：loop 长度越接近（gavg 越小），分数越高
 3. **tetrad 加成**：更多 tetrad（3+）获得额外加成
 
+#### 1.4.1 `--max-g4-length` 对不同 tetrads 的实际影响
+
+在 QGRS-Rust 中，`--max-g4-length` 不只是一个“输出过滤阈值”，它会同时影响候选生成、loop 扩展、可行性检查和打分。候选内部实际使用的 `max_length` 为：
+
+```text
+max_length(n) = min(legacy_cap(n), --max-g4-length)
+legacy_cap(n) = 30, 当 n < 3
+legacy_cap(n) = 45, 当 n >= 3
+```
+
+其中 `n` 为 `tetrads`。因此它对不同 tetrads 的影响可以先概括为：
+
+| tetrads | 候选实际使用的 `max_length` | `--max-g4-length` 的作用 |
+| --- | --- | --- |
+| `n < 3` | `min(30, L)` | 只有当 `L < 30` 时，才会真正压低 2-tetrad 候选的允许总长度、分数和可扩展 loop 空间 |
+| `n >= 3` | `min(45, L)` | 只有当 `L < 45` 时，才会真正压低 3-tetrad 及以上候选的允许总长度、分数和可扩展 loop 空间 |
+
+这里的 `L = --max-g4-length`。如果只看默认参数 `L=45`，那么旧版 QGRS 的分段规则可以直接改写成下面这张“`tetrads -> 允许总长度 -> 分数影响`”对照表：
+
+| tetrads | 允许总长度上限 | 分数影响 |
+| --- | --- | --- |
+| 2 | `<= 30` | `gscore = floor(21 - gavg)` |
+| 3 | `<= 45` | `gscore = floor(64 - gavg)` |
+| 4 | `<= 45` | `gscore = floor(84 - gavg)` |
+| 5 | `<= 45` | `gscore = floor(96 - gavg)` |
+| 6 | `<= 45` | `gscore = floor(100 - gavg)` |
+| 7 | `<= 45` | `gscore = floor(96 - gavg)` |
+| 8 | `<= 45` | `gscore = floor(84 - gavg)` |
+| 9 | `<= 45` | `gscore = floor(64 - gavg)` |
+| 10 | `<= 45` | `gscore = floor(36 - gavg)` |
+
+说明：
+- 这里的 `gavg = (|y1-y2| + |y2-y3| + |y1-y3|) / 3`，表示 3 个 loop 长度不均匀性的惩罚项。
+- `2-tetrad` 候选默认只拿到 `30 bp` 的长度预算，所以即使把 `--max-g4-length` 从 `45` 提高到更大，它的打分和长度判定也不会继续放宽。
+- `3-tetrad` 及以上候选默认共享 `45 bp` 的长度预算；当 `--max-g4-length < 45` 时，它们的分数上限和可扩展 loop 空间会一起下降。
+- `--max-g4-length` 还会限制种子阶段允许枚举的最大 tetrads：`max_tetrads_allowed = min(max_g_run, floor(L/4))`。因此当 `L` 很小时，某些高 tetrad 候选会在 BFS 之前就不再生成。
+
 **典型分数对比**（max_length=45, min_tetrads=2）：
 - `{tetrad=3, y1=5, y2=5, y3=5}`：gmax=32, gavg=0, bonus=32 → score=64
 - `{tetrad=3, y1=5, y2=2, y3=5}`：gmax=32, gavg=2, bonus=32 → score=62
