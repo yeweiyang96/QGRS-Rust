@@ -10,10 +10,13 @@ mod search;
 #[cfg(test)]
 mod tests;
 
-pub use chunks::{find_owned_bytes, find_owned_bytes_with_limits, find_owned_bytes_with_topology};
+pub use chunks::{
+    find_owned_bytes, find_owned_bytes_with_limits, find_owned_bytes_with_topology,
+    find_owned_bytes_with_topology_and_base,
+};
 pub use consolidation::{consolidate_g4s, consolidate_g4s_with_topology};
 pub use data::{
-    ChromSequence, DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, InputMode, ScanLimits,
+    ChromSequence, DEFAULT_MAX_G4_LENGTH, DEFAULT_MAX_RUN, InputMode, QuartetBase, ScanLimits,
     SequenceTopology,
 };
 pub use export::{

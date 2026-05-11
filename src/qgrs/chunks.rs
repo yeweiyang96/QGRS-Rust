@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use crate::qgrs::data::{ScanLimits, SequenceData, SequenceTopology};
+use crate::qgrs::data::{QuartetBase, ScanLimits, SequenceData, SequenceTopology};
 use crate::qgrs::search::{G4, find_raw_on_window_bytes, find_raw_with_sequence};
 
 const WINDOW_MIN_BP: usize = 32;
@@ -10,12 +10,13 @@ const WINDOW_MAX_BP: usize = 64;
 const WINDOW_PADDING_BP: usize = 27;
 
 pub fn find_owned_bytes(sequence: Arc<Vec<u8>>, min_tetrads: usize, min_score: i32) -> Vec<G4> {
-    find_owned_bytes_with_topology(
+    find_owned_bytes_with_topology_and_base(
         sequence,
         min_tetrads,
         min_score,
         ScanLimits::default(),
         SequenceTopology::Linear,
+        QuartetBase::G,
     )
 }
 
@@ -25,12 +26,13 @@ pub fn find_owned_bytes_with_limits(
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
-    find_owned_bytes_with_topology(
+    find_owned_bytes_with_topology_and_base(
         sequence,
         min_tetrads,
         min_score,
         limits,
         SequenceTopology::Linear,
+        QuartetBase::G,
     )
 }
 
@@ -41,10 +43,28 @@ pub fn find_owned_bytes_with_topology(
     limits: ScanLimits,
     topology: SequenceTopology,
 ) -> Vec<G4> {
+    find_owned_bytes_with_topology_and_base(
+        sequence,
+        min_tetrads,
+        min_score,
+        limits,
+        topology,
+        QuartetBase::G,
+    )
+}
+
+pub fn find_owned_bytes_with_topology_and_base(
+    sequence: Arc<Vec<u8>>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    target_base: QuartetBase,
+) -> Vec<G4> {
     if topology.is_circular() {
-        return find_owned_bytes_circular(sequence, min_tetrads, min_score, limits);
+        return find_owned_bytes_circular(sequence, min_tetrads, min_score, limits, target_base);
     }
-    find_owned_bytes_linear(sequence, min_tetrads, min_score, limits)
+    find_owned_bytes_linear(sequence, min_tetrads, min_score, limits, target_base)
 }
 
 fn find_owned_bytes_linear(
@@ -52,6 +72,7 @@ fn find_owned_bytes_linear(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    target_base: QuartetBase,
 ) -> Vec<G4> {
     let chunk_size = chunk_size_for_limits(limits);
     if sequence.len() > chunk_size {
@@ -80,6 +101,7 @@ fn find_owned_bytes_linear(
                     min_tetrads,
                     min_score,
                     limits,
+                    target_base,
                 );
                 hits.into_iter()
             })
@@ -88,7 +110,7 @@ fn find_owned_bytes_linear(
         return merged_raw;
     }
     let seq = Arc::new(SequenceData::from_bytes(sequence));
-    find_with_sequence(seq, min_tetrads, min_score, limits)
+    find_with_sequence_and_base(seq, min_tetrads, min_score, limits, target_base)
 }
 
 fn find_owned_bytes_circular(
@@ -96,6 +118,7 @@ fn find_owned_bytes_circular(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    target_base: QuartetBase,
 ) -> Vec<G4> {
     let sequence_len = sequence.len();
     if sequence_len == 0 {
@@ -107,7 +130,13 @@ fn find_owned_bytes_circular(
     if prefix_len > 0 {
         extended.extend_from_slice(&sequence[..prefix_len]);
     }
-    let mut hits = find_owned_bytes_linear(Arc::new(extended), min_tetrads, min_score, limits);
+    let mut hits = find_owned_bytes_linear(
+        Arc::new(extended),
+        min_tetrads,
+        min_score,
+        limits,
+        target_base,
+    );
     retain_circular_raw_hits(&mut hits, sequence_len);
     hits
 }
@@ -149,11 +178,22 @@ pub(crate) fn shift_g4(g4: &mut G4, offset: usize) {
     g4.tetrad4 += offset;
 }
 
+#[cfg(test)]
 pub(crate) fn find_with_sequence(
     seq: Arc<SequenceData>,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
 ) -> Vec<G4> {
-    find_raw_with_sequence(seq, min_tetrads, min_score, limits)
+    find_with_sequence_and_base(seq, min_tetrads, min_score, limits, QuartetBase::G)
+}
+
+pub(crate) fn find_with_sequence_and_base(
+    seq: Arc<SequenceData>,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    target_base: QuartetBase,
+) -> Vec<G4> {
+    find_raw_with_sequence(seq, min_tetrads, min_score, limits, target_base)
 }

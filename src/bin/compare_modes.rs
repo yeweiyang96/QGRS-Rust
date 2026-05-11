@@ -11,7 +11,7 @@ fn main() {
 
     if args.len() < 2 {
         eprintln!(
-            "Usage: {} <fasta_path_or_gz> [min_tetrads] [min_gscore]",
+            "Usage: {} <fasta_path_or_gz> [min_tetrads] [min_score]",
             args[0]
         );
         eprintln!("\nExamples:");
@@ -22,7 +22,7 @@ fn main() {
 
     let path = PathBuf::from(&args[1]);
     let min_tetrads = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
-    let min_gscore = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(17);
+    let min_score = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(17);
 
     if !path.exists() {
         eprintln!("❌ File does not exist: {:?}", path);
@@ -34,8 +34,8 @@ fn main() {
     println!("════════════════════════════════════════════════════════");
     println!("File: {}", path.display());
     println!(
-        "Parameters: min_tetrads={}, min_gscore={}",
-        min_tetrads, min_gscore
+        "Parameters: min_tetrads={}, min_score={}",
+        min_tetrads, min_score
     );
     println!("════════════════════════════════════════════════════════\n");
 
@@ -58,7 +58,7 @@ fn main() {
     let mut batch_results: HashMap<String, Vec<_>> = HashMap::new();
     let limits = ScanLimits::default();
     for chrom in &sequences {
-        let raw = find_owned_bytes_with_limits(chrom.sequence(), min_tetrads, min_gscore, limits);
+        let raw = find_owned_bytes_with_limits(chrom.sequence(), min_tetrads, min_score, limits);
         let (hits, _ranges) = consolidate_g4s(raw);
         batch_results.insert(chrom.name().to_string(), hits);
     }
@@ -90,7 +90,7 @@ fn main() {
     let start = Instant::now();
 
     let mut stream_results: HashMap<String, Vec<_>> = HashMap::new();
-    if let Err(e) = stream::process_fasta_stream(&path, min_tetrads, min_gscore, |name, results| {
+    if let Err(e) = stream::process_fasta_stream(&path, min_tetrads, min_score, |name, results| {
         stream_results.insert(name, results);
         Ok(())
     }) {
@@ -176,7 +176,7 @@ fn main() {
                         || batch_g4.end != stream_g4.end
                         || batch_g4.sequence() != stream_g4.sequence()
                         || batch_g4.tetrads != stream_g4.tetrads
-                        || batch_g4.gscore != stream_g4.gscore
+                        || batch_g4.score != stream_g4.score
                         || batch_g4.length != stream_g4.length
                         || batch_g4.y1 != stream_g4.y1
                         || batch_g4.y2 != stream_g4.y2
@@ -188,7 +188,7 @@ fn main() {
                             name
                         ));
                         details.push(format!(
-                            "      Batch:  pos={}..{}, len={}, seq={}, tetrads={}, y=({},{},{}), gscore={}",
+                            "      Batch:  pos={}..{}, len={}, seq={}, tetrads={}, y=({},{},{}), score={}",
                             batch_g4.start,
                             batch_g4.end,
                             batch_g4.length,
@@ -197,10 +197,10 @@ fn main() {
                             batch_g4.y1,
                             batch_g4.y2,
                             batch_g4.y3,
-                            batch_g4.gscore
+                            batch_g4.score
                         ));
                         details.push(format!(
-                            "      Stream: pos={}..{}, len={}, seq={}, tetrads={}, y=({},{},{}), gscore={}",
+                            "      Stream: pos={}..{}, len={}, seq={}, tetrads={}, y=({},{},{}), score={}",
                             stream_g4.start,
                             stream_g4.end,
                             stream_g4.length,
@@ -209,7 +209,7 @@ fn main() {
                             stream_g4.y1,
                             stream_g4.y2,
                             stream_g4.y3,
-                            stream_g4.gscore
+                            stream_g4.score
                         ));
                         mismatches += 1;
                         if mismatches >= 10 {
@@ -246,7 +246,7 @@ fn main() {
         println!("  ✅ All results are completely consistent!");
         println!("     - Chromosome count: {}", batch_results.len());
         println!("     - Total G4s: {}", batch_total_hits);
-        println!("     - All G4 fields (position, length, sequence, tetrads, loops, gscore) match");
+        println!("     - All G4 fields (position, length, sequence, tetrads, loops, score) match");
     } else {
         println!("  ❌ Found {} mismatch(es):", mismatches);
         for detail in details {

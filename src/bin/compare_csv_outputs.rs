@@ -11,7 +11,7 @@ struct G4Record {
     y1: u32,
     y2: u32,
     y3: u32,
-    gscore: u32,
+    score: u32,
     sequence: String,
 }
 
@@ -39,7 +39,7 @@ fn parse_csv_file(path: &Path) -> Result<Vec<G4Record>, Box<dyn std::error::Erro
             y1: parts[4].parse()?,
             y2: parts[5].parse()?,
             y3: parts[6].parse()?,
-            gscore: parts[7].parse()?,
+            score: parts[7].parse()?,
             sequence: parts[8].to_string(),
         });
     }
@@ -88,10 +88,10 @@ fn compare_records(mmap_records: &[G4Record], stream_records: &[G4Record]) -> (u
                         mmap.tetrads, stream.tetrads
                     ));
                 }
-                if mmap.gscore != stream.gscore {
+                if mmap.score != stream.score {
                     details.push(format!(
-                        "      gscore: mmap={}, stream={}",
-                        mmap.gscore, stream.gscore
+                        "      score: mmap={}, stream={}",
+                        mmap.score, stream.score
                     ));
                 }
                 if mmap.y1 != stream.y1 || mmap.y2 != stream.y2 || mmap.y3 != stream.y3 {

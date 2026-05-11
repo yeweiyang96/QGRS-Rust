@@ -4,7 +4,7 @@ BFS (breadth-first search) candidate expansion is the core search logic of QGRS-
 
 ### 1.1 Seed Generation (`seed_queue`)
 
-**Goal**: scan the sequence to identify every potential G-run (a contiguous stretch of G bases), then generate initial candidates over the Cartesian product of "allowed tetrad counts x allowed offsets". Every later BFS expansion starts from these seeds.
+**Goal**: scan the sequence to identify every potential target-base run (a contiguous stretch of selected bases), then generate initial candidates over the Cartesian product of "allowed tetrad counts x allowed offsets". Every later BFS expansion starts from these seeds.
 
 **Implementation details**:
 ```rust
@@ -14,9 +14,9 @@ fn seed_queue(
     min_tetrads: usize,
     limits: ScanLimits,
 ) {
-    // Limit the tetrad count so we do not generate seeds beyond max_g_run
+    // Limit the tetrad count so we do not generate seeds beyond max_run
     // or max_g4_length / 4
-    let mut max_tetrads_allowed = limits.max_g_run;
+    let mut max_tetrads_allowed = limits.max_run;
     if limits.max_g4_length >= 4 {
         max_tetrads_allowed = max_tetrads_allowed.min(limits.max_g4_length / 4);
     }
@@ -24,7 +24,7 @@ fn seed_queue(
         return;
     }
 
-    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads) {
+    for (run_start, run_len) in BaseRunScanner::new(&seq.normalized, min_tetrads) {
         let max_tetrads_for_run = run_len.min(max_tetrads_allowed);
         let mut tetrads = min_tetrads;
         while tetrads <= max_tetrads_for_run {
@@ -43,12 +43,12 @@ fn seed_queue(
 ```
 
 **Key optimizations**:
-- `GRunScanner::new(&seq.normalized, min_tetrads)` still relies on `memchr2(b'g', b'G')`, but now returns only runs with length >= `min_tetrads`, which reduces filtering work in upper layers. The SIMD scan is about 10x faster than checking one byte at a time.
-- `max_tetrads_allowed = min(max_g_run, max_g4_length/4)` combines the G-run length bound with the global length bound, preventing redundant seeds that could never pass the later `max_length` check.
-- When a run is longer than `max_g_run`, `run_len.min(max_tetrads_allowed)` truncates the available tetrad counts, but the later offset enumeration still covers the whole run. That means a long run that exceeds the "maximum contiguous G" limit still enters BFS through bounded windows instead of being dropped entirely.
+- `BaseRunScanner::new(&seq.normalized, min_tetrads)` still relies on `memchr2(target_base.lowercase_byte(), target_base.uppercase_byte())`, but now returns only runs with length >= `min_tetrads`, which reduces filtering work in upper layers. The SIMD scan is about 10x faster than checking one byte at a time.
+- `max_tetrads_allowed = min(max_run, max_g4_length/4)` combines the target-base run length bound with the global length bound, preventing redundant seeds that could never pass the later `max_length` check.
+- When a run is longer than `max_run`, `run_len.min(max_tetrads_allowed)` truncates the available tetrad counts, but the later offset enumeration still covers the whole run. That means a long run that exceeds the "maximum contiguous G" limit still enters BFS through bounded windows instead of being dropped entirely.
 - For each run, all offsets are enumerated again for every valid tetrad count. This ensures that long runs such as `GGGGG` cover every sub-interval without rescanning the sequence multiple times.
 
-**Example** (`min_tetrads=2`, `max_g_run=5`, `max_g4_length=40`):
+**Example** (`min_tetrads=2`, `max_run=5`, `max_g4_length=40`):
 - Sequence fragment: `GGGGG...` (`run_len=5`)
 - Valid tetrad counts: 2, 3, 4, 5 (constrained by `max_g4_length`, because `4x5=20 <= 40`)
 - For `tetrad=3`, the allowed offsets are `0..=2`, so three start positions are generated: `start`, `start+1`, `start+2`
@@ -117,7 +117,7 @@ impl G4Candidate {
 
 ### 1.3 Loop Discovery Mechanism (`expand`)
 
-**Goal**: from the current candidate state (with some loops already assigned), scan forward to the next G-run and enumerate all valid lengths for the next loop.
+**Goal**: from the current candidate state (with some loops already assigned), scan forward to the next target-base run and enumerate all valid lengths for the next loop.
 
 **Implementation details**:
 ```rust
@@ -149,7 +149,7 @@ fn find_loop_lengths_from(cursor: usize, data: &SequenceData, limits: &ScanLimit
     let min_len = cand.min_acceptable_loop_length();  // 0 or 1 (if a previous loop is already 0)
     let max_len = limits.max_length - cand.partial_length() - cand.tetrad_len;
 
-    // Scan forward from cursor and look for a G-run of length tetrad_len
+    // Scan forward from cursor and look for a target-base run of length tetrad_len
     for y in min_len..=max_len {
         let tetrad_start = cursor + y;
         if is_valid_tetrad_at(tetrad_start, cand.tetrad_len, data) {
@@ -168,7 +168,7 @@ fn find_loop_lengths_from(cursor: usize, data: &SequenceData, limits: &ScanLimit
 **Expansion example**:
 - Candidate state: `start=212, tetrad_len=3, y1=5` (the first loop is already assigned)
 - `cursor = 212 + 3 + 5 = 220` (the second tetrad should start here)
-- Assume length-3 G-runs are found at positions 220 and 222
+- Assume length-3 target-base runs are found at positions 220 and 222
 - Two new candidates are generated:
   - `{start=212, tetrad=3, y1=5, y2=0}` (`loop2` length is 0)
   - `{start=212, tetrad=3, y1=5, y2=2}` (`loop2` length is 2)
@@ -228,21 +228,21 @@ Here `L = --max-g4-length`. If we focus on the default setting `L=45`, the legac
 
 | tetrads | allowed total length | score impact |
 | --- | --- | --- |
-| 2 | `<= 30` | `gscore = floor(21 - gavg)` |
-| 3 | `<= 45` | `gscore = floor(64 - gavg)` |
-| 4 | `<= 45` | `gscore = floor(84 - gavg)` |
-| 5 | `<= 45` | `gscore = floor(96 - gavg)` |
-| 6 | `<= 45` | `gscore = floor(100 - gavg)` |
-| 7 | `<= 45` | `gscore = floor(96 - gavg)` |
-| 8 | `<= 45` | `gscore = floor(84 - gavg)` |
-| 9 | `<= 45` | `gscore = floor(64 - gavg)` |
-| 10 | `<= 45` | `gscore = floor(36 - gavg)` |
+| 2 | `<= 30` | `score = floor(21 - gavg)` |
+| 3 | `<= 45` | `score = floor(64 - gavg)` |
+| 4 | `<= 45` | `score = floor(84 - gavg)` |
+| 5 | `<= 45` | `score = floor(96 - gavg)` |
+| 6 | `<= 45` | `score = floor(100 - gavg)` |
+| 7 | `<= 45` | `score = floor(96 - gavg)` |
+| 8 | `<= 45` | `score = floor(84 - gavg)` |
+| 9 | `<= 45` | `score = floor(64 - gavg)` |
+| 10 | `<= 45` | `score = floor(36 - gavg)` |
 
 Notes:
 - Here `gavg = (|y1-y2| + |y2-y3| + |y1-y3|) / 3`, the penalty term for loop-length imbalance.
 - A 2-tetrad candidate gets only a `30 bp` length budget by default, so raising `--max-g4-length` above `45` does not further relax its scoring or length check.
 - Candidates with 3 tetrads or more share a default `45 bp` length budget; when `--max-g4-length < 45`, both their score ceiling and loop expansion space shrink together.
-- `--max-g4-length` also limits the maximum tetrad count that can be seeded: `max_tetrads_allowed = min(max_g_run, floor(L/4))`. When `L` is small, some high-tetrad candidates disappear before BFS expansion even starts.
+- `--max-g4-length` also limits the maximum tetrad count that can be seeded: `max_tetrads_allowed = min(max_run, floor(L/4))`. When `L` is small, some high-tetrad candidates disappear before BFS expansion even starts.
 
 **Typical score comparison** (`max_length=45`, `min_tetrads=2`):
 - `{tetrad=3, y1=5, y2=5, y3=5}`: `gmax=32`, `gavg=0`, `bonus=32` -> `score=64`
@@ -281,7 +281,7 @@ void findCandidates(const char* seq, int len) {
 **Key differences**:
 | Dimension | Rust | C++ |
 |------|------|-----|
-| G-run scanning | `memchr2` SIMD (~10x faster) | byte-by-byte `while` loop |
+| target-base run scanning | `memchr2` SIMD (~10x faster) | byte-by-byte `while` loop |
 | Queue type | `VecDeque<G4Candidate>` | `std::queue<Candidate>` |
 | Memory management | `Arc<Vec<u8>>` zero-copy | `std::string` copy each time |
 | Parallelism | Rayon automatic chunking | single-threaded sequential execution |
@@ -296,26 +296,26 @@ void findCandidates(const char* seq, int len) {
 
 **Scenario**: five consecutive G's are detected at position 212
 - Sequence: `...GGGGGACGTGGGACGTGGG...`
-- Parameters: `min_tetrads=2, max_g_run=5, max_length=45`
+- Parameters: `min_tetrads=2, max_run=5, max_length=45`
 
 **BFS expansion process**:
 1. **Seeds**: generate 4 candidates (`offset 0-3` corresponding to `tetrad=2,3,4,5`)
 2. **First expansion round** (fill `y1`):
-   - Candidate `{212, tetrad=3}` finds a G-run at position 220
+   - Candidate `{212, tetrad=3}` finds a target-base run at position 220
    - Viable `y1` values discovered: `[5, 6, 7]` (corresponding to tetrads at positions 220, 221, 222)
 3. **Second expansion round** (fill `y2`):
    - Candidate `{212, tetrad=3, y1=5}` expands into:
-     - `{..., y1=5, y2=2}` (`gscore=19`)
-     - `{..., y1=5, y2=5}` (`gscore=17`)
+     - `{..., y1=5, y2=2}` (`score=19`)
+     - `{..., y1=5, y2=5}` (`score=17`)
 4. **Third expansion round** (fill `y3`):
    - Candidate `{..., y1=5, y2=2}` finally expands into:
-     - `{..., y1=5, y2=2, y3=5}` (`gscore=19`, `length=27`)
+     - `{..., y1=5, y2=2, y3=5}` (`score=19`, `length=27`)
 5. **Collection**: it passes `viable()` (`length <= 45`, `score >= 0`) and is pushed into `raw_g4s`
 
 **Deduplication result**:
 - The raw output contains multiple candidates with `start=212` but different loop layouts
-- In phase 1 of `consolidate_g4s`, deduplication keeps the `gscore=19` variant by using the HashMap Entry API
-- Final output: `start=212, length=27, tetrads=3, y1=5, y2=2, y3=5, gscore=19`
+- In phase 1 of `consolidate_g4s`, deduplication keeps the `score=19` variant by using the HashMap Entry API
+- Final output: `start=212, length=27, tetrads=3, y1=5, y2=2, y3=5, score=19`
 
 ---
 ## 2. Family Consolidation (`consolidate_g4s`) in Detail
@@ -341,16 +341,16 @@ for g in raw_g4s.into_iter() {
     match best_by_key.entry(key) {
         Entry::Vacant(slot) => slot.insert(g),
         Entry::Occupied(mut slot) => {
-            if g.gscore > slot.get().gscore {
+            if g.score > slot.get().score {
                 slot.insert(g);  // replace with the higher-score version
             }
         }
     }
 }
 ```
-For multiple candidates with the same key, the one with the highest `gscore` is kept.
+For multiple candidates with the same key, the one with the highest `score` is kept.
 
-**Why this is needed**: BFS may generate candidates with identical coordinates but different loop layouts, such as `start=212, y1=5, y2=2, y3=5, gscore=19` versus `y1=5, y2=1, y3=6, gscore=17`. The HashMap guarantees that only the best configuration survives. HashMap lookup is `O(1)`, while the C++ `set` is `O(log n)`.
+**Why this is needed**: BFS may generate candidates with identical coordinates but different loop layouts, such as `start=212, y1=5, y2=2, y3=5, score=19` versus `y1=5, y2=1, y3=6, score=17`. The HashMap guarantees that only the best configuration survives. HashMap lookup is `O(1)`, while the C++ `set` is `O(log n)`.
 
 
 ### Phase 2 - Grouping:
@@ -396,15 +396,15 @@ for g4 in deduped.into_iter() {
 **Order dependence**: after deduplication, candidates must be sorted by `(start, end)`. Otherwise the same candidate set can be assigned to different families in chunk and stream modes because of different iteration orders, which would make the outputs diverge.
 
 ### Phase 3 - Pick the Winner:
-For each family, output the member with the highest `gscore`.
+For each family, output the member with the highest `score`.
 Biological intuition: overlapping structures may represent the same feature, so the best-scoring configuration is kept.
 
 ### 2.1 Metadata Export and `--overlap`
 
 `consolidate_g4s` now returns `(Vec<G4>, Vec<(usize, usize)>)`: the first item is the winner of each family, and the second item records the `[start, end]` range of every family. When the CLI `--overlap` flag is enabled, two debugging files are written alongside the main CSV or Parquet output:
 
-1. `{base}.overlap.csv`: uses `render_csv_results` to dump sorted raw hits directly. The columns are exactly the same as the main CSV, which makes diffing easier.
-2. `{base}.family.csv`: uses `render_family_ranges_csv` to output `family_index,start,end`, making it easy to locate which families were merged.
+1. `{seqid}.{motif}.overlap.csv`: uses `render_csv_results` to dump sorted raw hits directly. The columns are exactly the same as the main CSV, which makes diffing easier.
+2. `{seqid}.{motif}.family.csv`: uses `render_family_ranges_csv` to output `family_index,start,end`, making it easy to locate which families were merged.
 
 The streaming pipeline passes `hits`, `family_ranges`, and optional `raw_hits` to the callback through `StreamChromosomeResults`:
 

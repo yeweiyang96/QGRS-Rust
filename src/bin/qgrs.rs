@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use qgrs_rust::qgrs::{
-    self, DEFAULT_MAX_G_RUN, DEFAULT_MAX_G4_LENGTH, G4, InputMode, ScanLimits, SequenceTopology,
+    self, DEFAULT_MAX_G4_LENGTH, DEFAULT_MAX_RUN, G4, InputMode, QuartetBase, ScanLimits,
+    SequenceTopology,
 };
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -32,15 +33,15 @@ where
     let mut file_arg: Option<PathBuf> = None;
     let mut min_tetrads: usize = 2;
     let mut min_score: i32 = 17;
-    let mut max_g_run: usize = DEFAULT_MAX_G_RUN;
+    let mut max_run: usize = DEFAULT_MAX_RUN;
     let mut max_g4_length: usize = DEFAULT_MAX_G4_LENGTH;
     let mut format = OutputFormat::Csv;
     let mut output_path: Option<PathBuf> = None;
     let mut output_dir: Option<PathBuf> = None;
     let mut mode = InputMode::Mmap;
     let mut include_overlap = false;
-    let mut include_revcomp = false;
     let mut circular = false;
+    let mut target_base = QuartetBase::G;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -87,16 +88,25 @@ where
                     .ok_or_else(|| usage("missing value for --mode"))?;
                 mode = parse_mode(&value)?;
             }
-            "--max-g-run" => {
+            "--base" => {
                 let value = args
                     .next()
-                    .ok_or_else(|| usage("missing value for --max-g-run"))?
+                    .ok_or_else(|| usage("missing value for --base"))?;
+                target_base = parse_base(&value)?;
+            }
+            "--max-run" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| usage("missing value for --max-run"))?
                     .parse::<usize>()
-                    .map_err(|_| usage("--max-g-run must be a positive integer"))?;
+                    .map_err(|_| usage("--max-run must be a positive integer"))?;
                 if value == 0 {
-                    return Err(usage("--max-g-run must be > 0"));
+                    return Err(usage("--max-run must be > 0"));
                 }
-                max_g_run = value;
+                max_run = value;
+            }
+            "--max-g-run" => {
+                return Err(usage("--max-g-run was replaced by --max-run"));
             }
             "--max-g4-length" => {
                 let value = args
@@ -124,9 +134,6 @@ where
             "--overlap" => {
                 include_overlap = true;
             }
-            "--revcomp" => {
-                include_revcomp = true;
-            }
             "--circular" => {
                 circular = true;
             }
@@ -149,34 +156,27 @@ where
     let min_required_length = min_tetrads
         .checked_mul(4)
         .ok_or_else(|| usage("--min-tetrads is too large"))?;
-    if max_g_run < min_tetrads {
-        return Err(usage("--max-g-run must be ≥ --min-tetrads"));
+    if max_run < min_tetrads {
+        return Err(usage("--max-run must be ≥ --min-tetrads"));
     }
     if max_g4_length < min_required_length {
         return Err(usage("--max-g4-length must be ≥ 4 * --min-tetrads"));
     }
 
-    let limits = ScanLimits::new(max_g4_length, max_g_run);
+    let limits = ScanLimits::new(max_g4_length, max_run);
     let topology = if circular {
         SequenceTopology::Circular
     } else {
         SequenceTopology::Linear
     };
-    let scan = ScanConfig::new(min_tetrads, min_score, limits, topology);
+    let scan = ScanConfig::new(min_tetrads, min_score, limits, topology, target_base);
 
     match input {
         InputSpec::Inline(seq) => {
             if output_dir.is_some() {
                 return Err(usage("--output-dir can only be used with --file"));
             }
-            process_inline_sequence(
-                seq,
-                format,
-                output_path,
-                scan,
-                include_overlap,
-                include_revcomp,
-            )?;
+            process_inline_sequence(seq, format, output_path, scan, include_overlap)?;
         }
         InputSpec::File(path) => {
             if output_path.is_some() {
@@ -184,15 +184,7 @@ where
                     "--output is only valid with --sequence; use --output-dir for --file",
                 ));
             }
-            process_fasta_file(
-                path,
-                mode,
-                format,
-                scan,
-                output_dir,
-                include_overlap,
-                include_revcomp,
-            )?;
+            process_fasta_file(path, mode, format, scan, output_dir, include_overlap)?;
         }
     }
     Ok(())
@@ -211,8 +203,11 @@ fn usage(reason: &str) -> String {
         "  --file <PATH>        Read sequences from FASTA/FASTA.gz (chromosomes split independently)\n",
     );
     msg.push_str("  --min-tetrads <N>    Minimum tetrads to seed (default 2)\n");
-    msg.push_str("  --min-score <S>      Minimum g-score (default 17)\n");
-    msg.push_str("  --max-g-run <N>      Maximum allowed G-run length (default 10)\n");
+    msg.push_str("  --min-score <S>      Minimum score (default 17)\n");
+    msg.push_str(
+        "  --base <g|c>         Tetrad base to scan: g for G4, c for i-motif (default g)\n",
+    );
+    msg.push_str("  --max-run <N>        Maximum allowed target-base run length (default 10)\n");
     msg.push_str("  --max-g4-length <N>  Maximum allowed G4 length in bp (default 45)\n");
     msg.push_str("  --format <csv|parquet>  Output format (default csv)\n");
     msg.push_str(
@@ -222,9 +217,6 @@ fn usage(reason: &str) -> String {
     msg.push_str("  --mode <mmap|stream> Input mode when using --file (default mmap)\n");
     msg.push_str(
         "  --overlap            Emit raw hits (.overlap.<format>) and family ranges (.family.<format>)\n",
-    );
-    msg.push_str(
-        "  --revcomp            Also scan reverse-complement and emit .revcomp.<format>\n",
     );
     msg.push_str("  --circular           Treat each sequence/chromosome as circular\n");
     msg.push_str("  --help               Show this message\n");
@@ -239,6 +231,17 @@ fn parse_mode(value: &str) -> Result<InputMode, String> {
     }
 }
 
+fn parse_base(value: &str) -> Result<QuartetBase, String> {
+    if value.len() != 1 {
+        return Err(usage("--base must be exactly one character: g or c"));
+    }
+    match value.as_bytes()[0].to_ascii_lowercase() {
+        b'g' => Ok(QuartetBase::G),
+        b'c' => Ok(QuartetBase::C),
+        _ => Err(usage("--base must be either 'g' for G4 or 'c' for i-motif")),
+    }
+}
+
 enum InputSpec {
     Inline(String),
     File(PathBuf),
@@ -250,6 +253,7 @@ struct ScanConfig {
     min_score: i32,
     limits: ScanLimits,
     topology: SequenceTopology,
+    target_base: QuartetBase,
 }
 
 impl ScanConfig {
@@ -258,12 +262,14 @@ impl ScanConfig {
         min_score: i32,
         limits: ScanLimits,
         topology: SequenceTopology,
+        target_base: QuartetBase,
     ) -> Self {
         Self {
             min_tetrads,
             min_score,
             limits,
             topology,
+            target_base,
         }
     }
 
@@ -282,6 +288,10 @@ impl ScanConfig {
     fn topology(self) -> SequenceTopology {
         self.topology
     }
+
+    fn target_base(self) -> QuartetBase {
+        self.target_base
+    }
 }
 
 fn process_inline_sequence(
@@ -290,16 +300,12 @@ fn process_inline_sequence(
     output_path: Option<PathBuf>,
     scan: ScanConfig,
     include_overlap: bool,
-    include_revcomp: bool,
 ) -> Result<(), String> {
     let mut normalized = sequence.into_bytes();
     normalized.make_ascii_lowercase();
     let sequence_len = normalized.len();
     if include_overlap && output_path.is_none() {
         return Err(usage("--overlap requires --output when using --sequence"));
-    }
-    if include_revcomp && output_path.is_none() {
-        return Err(usage("--revcomp requires --output when using --sequence"));
     }
 
     let (results, family_ranges, raw_hits) = run_scan_for_export(
@@ -330,34 +336,6 @@ fn process_inline_sequence(
         )?;
     }
 
-    if include_revcomp {
-        let base = output_path
-            .as_ref()
-            .expect("revcomp outputs require an explicit --output path");
-        let (revcomp_results, revcomp_family_ranges, revcomp_raw_hits) =
-            run_revcomp_scan_for_export(&normalized, scan, include_overlap);
-        let revcomp_path = revcomp_output_path(base, format);
-        write_results_to_path(
-            &revcomp_path,
-            format,
-            &revcomp_results,
-            scan.topology(),
-            sequence_len,
-        )?;
-        if include_overlap {
-            let revcomp_raw_hits = revcomp_raw_hits
-                .as_ref()
-                .expect("revcomp raw hits must be captured when overlap is requested");
-            write_overlap_exports(
-                &revcomp_path,
-                format,
-                revcomp_raw_hits,
-                &revcomp_family_ranges,
-                scan.topology(),
-                sequence_len,
-            )?;
-        }
-    }
     Ok(())
 }
 
@@ -368,7 +346,6 @@ fn process_fasta_file(
     scan: ScanConfig,
     output_dir: Option<PathBuf>,
     include_overlap: bool,
-    include_revcomp: bool,
 ) -> Result<(), String> {
     let dir = output_dir.ok_or_else(|| usage("--output-dir is required when --file is used"))?;
     fs::create_dir_all(&dir).map_err(|err| format!("failed to create {dir:?}: {err}"))?;
@@ -382,7 +359,12 @@ fn process_fasta_file(
             }
             let mut chrom_outputs = Vec::with_capacity(sequences.len());
             for chrom in sequences {
-                let filename = next_output_filename(chrom.name(), format, &mut name_counts);
+                let filename = next_output_filename(
+                    chrom.name(),
+                    format,
+                    scan.target_base(),
+                    &mut name_counts,
+                );
                 chrom_outputs.push((chrom, dir.join(filename)));
             }
             chrom_outputs.into_par_iter().try_for_each(
@@ -411,144 +393,28 @@ fn process_fasta_file(
                             sequence_len,
                         )?;
                     }
-                    if include_revcomp {
-                        let (revcomp_results, revcomp_ranges, revcomp_raw_hits) =
-                            run_revcomp_scan_for_export(sequence.as_slice(), scan, include_overlap);
-                        let revcomp_path = revcomp_output_path(&filepath, format);
-                        write_results_to_path(
-                            &revcomp_path,
-                            format,
-                            &revcomp_results,
-                            scan.topology(),
-                            sequence_len,
-                        )?;
-                        if include_overlap {
-                            let revcomp_raw_hits = revcomp_raw_hits.as_ref().expect(
-                                "revcomp raw hits must be captured when overlap is requested",
-                            );
-                            write_overlap_exports(
-                                &revcomp_path,
-                                format,
-                                revcomp_raw_hits,
-                                &revcomp_ranges,
-                                scan.topology(),
-                                sequence_len,
-                            )?;
-                        }
-                    }
                     Ok(())
                 },
             )?;
         }
         InputMode::Stream => {
             let mut processed = 0usize;
-            if include_revcomp && include_overlap {
-                qgrs::stream::process_fasta_stream_with_limits_overlap_topology_and_sequence(
+            if include_overlap {
+                qgrs::stream::process_fasta_stream_with_limits_overlap_topology_and_len_with_base(
                     &path,
                     scan.min_tetrads(),
                     scan.min_score(),
                     scan.limits(),
                     scan.topology(),
-                    |name, mut stream_results, sequence| {
-                        processed += 1;
-                        let sequence_len = sequence.len();
-                        let filename = next_output_filename(&name, format, &mut name_counts);
-                        let filepath = dir.join(&filename);
-                        write_results_to_path(
-                            &filepath,
-                            format,
-                            &stream_results.hits,
-                            scan.topology(),
-                            sequence_len,
-                        )
-                        .map_err(io::Error::other)?;
-                        let raw_hits = stream_results
-                            .raw_hits
-                            .take()
-                            .expect("raw hits missing from overlap stream results");
-                        write_overlap_exports(
-                            &filepath,
-                            format,
-                            &raw_hits,
-                            &stream_results.family_ranges,
-                            scan.topology(),
-                            sequence_len,
-                        )
-                        .map_err(io::Error::other)?;
-
-                        let (revcomp_results, revcomp_ranges, revcomp_raw_hits) =
-                            run_revcomp_scan_for_export(&sequence, scan, true);
-                        let revcomp_path = revcomp_output_path(&filepath, format);
-                        write_results_to_path(
-                            &revcomp_path,
-                            format,
-                            &revcomp_results,
-                            scan.topology(),
-                            sequence_len,
-                        )
-                        .map_err(io::Error::other)?;
-                        let revcomp_raw_hits = revcomp_raw_hits
-                            .as_ref()
-                            .expect("revcomp raw hits must be captured when overlap is requested");
-                        write_overlap_exports(
-                            &revcomp_path,
-                            format,
-                            revcomp_raw_hits,
-                            &revcomp_ranges,
-                            scan.topology(),
-                            sequence_len,
-                        )
-                        .map_err(io::Error::other)?;
-                        Ok(())
-                    },
-                )
-                .map_err(|err| format!("failed to process {path:?}: {err}"))?;
-            } else if include_revcomp {
-                qgrs::stream::process_fasta_stream_with_limits_topology_and_sequence(
-                    &path,
-                    scan.min_tetrads(),
-                    scan.min_score(),
-                    scan.limits(),
-                    scan.topology(),
-                    |name, results, sequence| {
-                        processed += 1;
-                        let sequence_len = sequence.len();
-                        let filename = next_output_filename(&name, format, &mut name_counts);
-                        let filepath = dir.join(&filename);
-                        write_results_to_path(
-                            &filepath,
-                            format,
-                            &results,
-                            scan.topology(),
-                            sequence_len,
-                        )
-                        .map_err(io::Error::other)?;
-
-                        let (revcomp_results, _, _) =
-                            run_revcomp_scan_for_export(&sequence, scan, false);
-                        let revcomp_path = revcomp_output_path(&filepath, format);
-                        write_results_to_path(
-                            &revcomp_path,
-                            format,
-                            &revcomp_results,
-                            scan.topology(),
-                            sequence_len,
-                        )
-                        .map_err(io::Error::other)?;
-                        Ok(())
-                    },
-                )
-                .map_err(|err| format!("failed to process {path:?}: {err}"))?;
-            } else if include_overlap {
-                qgrs::stream::process_fasta_stream_with_limits_overlap_topology_and_len(
-                    &path,
-                    scan.min_tetrads(),
-                    scan.min_score(),
-                    scan.limits(),
-                    scan.topology(),
+                    scan.target_base(),
                     |name, mut stream_results, sequence_len| {
                         processed += 1;
-                        let filename = next_output_filename(&name, format, &mut name_counts);
+                        let filename = next_output_filename(
+                            &name,
+                            format,
+                            scan.target_base(),
+                            &mut name_counts,
+                        );
                         let filepath = dir.join(&filename);
                         write_results_to_path(
                             &filepath,
@@ -577,15 +443,21 @@ fn process_fasta_file(
                 )
                 .map_err(|err| format!("failed to process {path:?}: {err}"))?;
             } else {
-                qgrs::stream::process_fasta_stream_with_limits_topology_and_len(
+                qgrs::stream::process_fasta_stream_with_limits_topology_and_len_with_base(
                     &path,
                     scan.min_tetrads(),
                     scan.min_score(),
                     scan.limits(),
                     scan.topology(),
+                    scan.target_base(),
                     |name, results, sequence_len| {
                         processed += 1;
-                        let filename = next_output_filename(&name, format, &mut name_counts);
+                        let filename = next_output_filename(
+                            &name,
+                            format,
+                            scan.target_base(),
+                            &mut name_counts,
+                        );
                         let filepath = dir.join(&filename);
                         write_results_to_path(
                             &filepath,
@@ -611,6 +483,7 @@ fn process_fasta_file(
 fn next_output_filename(
     name: &str,
     format: OutputFormat,
+    target_base: QuartetBase,
     counts: &mut HashMap<String, usize>,
 ) -> String {
     let sanitized = sanitize_name(name);
@@ -622,7 +495,19 @@ fn next_output_filename(
         format!("_{}", entry)
     };
     *entry += 1;
-    format!("{}{suffix}.{}", sanitized, format.extension())
+    format!(
+        "{}{suffix}.{}.{}",
+        sanitized,
+        output_motif_label(target_base),
+        format.extension()
+    )
+}
+
+fn output_motif_label(target_base: QuartetBase) -> &'static str {
+    match target_base {
+        QuartetBase::G => "g4",
+        QuartetBase::C => "i-motif",
+    }
 }
 
 fn sanitize_name(raw: &str) -> String {
@@ -670,95 +555,15 @@ fn run_scan_for_export(
     capture_raw: bool,
     sequence_len: usize,
 ) -> ConsolidatedResults {
-    let raw = qgrs::find_owned_bytes_with_topology(
+    let raw = qgrs::find_owned_bytes_with_topology_and_base(
         sequence,
         scan.min_tetrads(),
         scan.min_score(),
         scan.limits(),
         scan.topology(),
+        scan.target_base(),
     );
     consolidate_for_export(raw, capture_raw, scan.topology(), sequence_len)
-}
-
-fn run_revcomp_scan_for_export(
-    forward_sequence: &[u8],
-    scan: ScanConfig,
-    capture_raw: bool,
-) -> ConsolidatedResults {
-    let sequence_len = forward_sequence.len();
-    let revcomp = Arc::new(reverse_complement_lowercase(forward_sequence));
-    let (hits, ranges, raw_hits) = run_scan_for_export(revcomp, scan, capture_raw, sequence_len);
-    let mapped_hits = map_revcomp_hits_to_forward(hits, scan.topology(), sequence_len);
-    let mapped_ranges = map_revcomp_ranges_to_forward(ranges, scan.topology(), sequence_len);
-    let mapped_raw_hits =
-        raw_hits.map(|hits| map_revcomp_hits_to_forward(hits, scan.topology(), sequence_len));
-    (mapped_hits, mapped_ranges, mapped_raw_hits)
-}
-
-fn reverse_complement_lowercase(sequence: &[u8]) -> Vec<u8> {
-    sequence
-        .iter()
-        .rev()
-        .map(|byte| match *byte {
-            b'a' | b'A' => b't',
-            b't' | b'T' | b'u' | b'U' => b'a',
-            b'c' | b'C' => b'g',
-            b'g' | b'G' => b'c',
-            b'n' | b'N' => b'n',
-            other => other.to_ascii_lowercase(),
-        })
-        .collect()
-}
-
-fn map_revcomp_hits_to_forward(
-    mut hits: Vec<G4>,
-    topology: SequenceTopology,
-    sequence_len: usize,
-) -> Vec<G4> {
-    if sequence_len == 0 {
-        return hits;
-    }
-    for hit in &mut hits {
-        let (start, end) = map_revcomp_interval(hit.start, hit.end, topology, sequence_len);
-        hit.start = start;
-        hit.end = end;
-    }
-    hits.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
-    hits
-}
-
-fn map_revcomp_ranges_to_forward(
-    mut ranges: Vec<(usize, usize)>,
-    topology: SequenceTopology,
-    sequence_len: usize,
-) -> Vec<(usize, usize)> {
-    if sequence_len == 0 {
-        return ranges;
-    }
-    for range in &mut ranges {
-        *range = map_revcomp_interval(range.0, range.1, topology, sequence_len);
-    }
-    ranges.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-    ranges
-}
-
-fn map_revcomp_interval(
-    start_rc: usize,
-    end_rc: usize,
-    topology: SequenceTopology,
-    sequence_len: usize,
-) -> (usize, usize) {
-    let end_anchor = circular_end_anchor(end_rc, topology, sequence_len);
-    let start = sequence_len - end_anchor + 1;
-    let end = start + (end_rc - start_rc);
-    (start, end)
-}
-
-fn circular_end_anchor(end: usize, topology: SequenceTopology, sequence_len: usize) -> usize {
-    if !topology.is_circular() || sequence_len == 0 || end == 0 {
-        return end;
-    }
-    ((end - 1) % sequence_len) + 1
 }
 
 fn write_primary_output(
@@ -843,10 +648,6 @@ fn write_overlap_exports(
     Ok(())
 }
 
-fn revcomp_output_path(base: &Path, format: OutputFormat) -> PathBuf {
-    append_output_suffix(base, ".revcomp", format)
-}
-
 fn overlap_path(base: &Path, format: OutputFormat) -> PathBuf {
     append_output_suffix(base, ".overlap", format)
 }
@@ -906,8 +707,8 @@ mod tests {
     fn default_limits_are_valid() {
         let limits = ScanLimits::default();
         assert_eq!(limits.max_g4_length, DEFAULT_MAX_G4_LENGTH);
-        assert_eq!(limits.max_g_run, DEFAULT_MAX_G_RUN);
-        assert!(limits.max_g_run >= 2);
+        assert_eq!(limits.max_run, DEFAULT_MAX_RUN);
+        assert!(limits.max_run >= 2);
         assert!(limits.max_g4_length >= 8);
     }
 
@@ -920,8 +721,8 @@ mod tests {
             "4",
             "--max-g4-length",
             "12",
-            "--max-g-run",
-            "2",
+            "--max-run",
+            "4",
         ]);
         assert!(err.is_err());
         let msg = err.unwrap_err().to_string();
@@ -937,11 +738,43 @@ mod tests {
     }
 
     #[test]
-    fn revcomp_requires_output_for_inline() {
-        let err = run_with_args(["--sequence", "GGGG", "--revcomp"]);
+    fn old_max_g_run_is_rejected_with_migration_guidance() {
+        let err = run_with_args(["--sequence", "GGGG", "--max-g-run", "4"]);
         assert!(err.is_err());
         let msg = err.unwrap_err();
-        assert!(msg.contains("--revcomp requires --output"));
+        assert!(msg.contains("--max-g-run was replaced by --max-run"));
+    }
+
+    #[test]
+    fn invalid_base_values_are_rejected() {
+        for value in ["a", "t", "gc", ""] {
+            let err = run_with_owned_args(vec![
+                "--sequence".to_string(),
+                "GGGG".to_string(),
+                "--base".to_string(),
+                value.to_string(),
+            ]);
+            assert!(err.is_err(), "base value {value:?} should fail");
+        }
+    }
+
+    #[test]
+    fn output_filename_includes_motif_label() {
+        let mut counts = HashMap::new();
+        assert_eq!(
+            next_output_filename("chr1", OutputFormat::Parquet, QuartetBase::G, &mut counts),
+            "chr1.g4.parquet"
+        );
+        assert_eq!(
+            next_output_filename("chr1", OutputFormat::Parquet, QuartetBase::G, &mut counts),
+            "chr1_1.g4.parquet"
+        );
+
+        let mut counts = HashMap::new();
+        assert_eq!(
+            next_output_filename("chr2", OutputFormat::Csv, QuartetBase::C, &mut counts),
+            "chr2.i-motif.csv"
+        );
     }
 
     #[test]
@@ -1045,75 +878,89 @@ mod tests {
     }
 
     #[test]
-    fn revcomp_inline_outputs_mapped_coordinates() {
-        let base = unique_test_path("qgrs_revcomp_inline");
+    fn base_c_inline_outputs_i_motif_hits_on_original_sequence() {
+        let base = unique_test_path("qgrs_base_c_inline");
         let output = base.with_extension("csv");
         let output_str = output.to_string_lossy().into_owned();
-        // Build a sequence where only reverse-complement scan should find the canonical motif.
-        let motif = b"ttggggaggggaggggaggggaaaaaaa";
-        let sequence = String::from_utf8(reverse_complement_lowercase(motif)).unwrap();
         let result = run_with_owned_args(vec![
             "--sequence".to_string(),
-            sequence,
+            "AAAAAAACCCCTCCCCTCCCCTCCCCTT".to_string(),
             "--min-tetrads".to_string(),
             "4".to_string(),
             "--min-score".to_string(),
             "17".to_string(),
-            "--revcomp".to_string(),
+            "--base".to_string(),
+            "c".to_string(),
             "--output".to_string(),
             output_str,
         ]);
         assert!(result.is_ok());
 
-        let revcomp_output = revcomp_output_path(&output, OutputFormat::Csv);
-        let revcomp_csv = fs::read_to_string(&revcomp_output).expect("revcomp output");
-        assert!(revcomp_csv.contains("\n8,26,19,4,1,1,1,84,GGGGAGGGGAGGGGAGGGG\n"));
+        let csv = fs::read_to_string(&output).expect("base c output");
+        assert!(csv.starts_with("start,end,length,tetrads,y1,y2,y3,score,sequence\n"));
+        assert!(csv.contains("\n8,26,19,4,1,1,1,84,CCCCTCCCCTCCCCTCCCC\n"));
+        assert!(!csv.contains("GGGGAGGGGAGGGGAGGGG"));
 
         let _ = fs::remove_file(&output);
-        let _ = fs::remove_file(revcomp_output);
     }
 
     #[test]
-    fn revcomp_interval_mapping_for_circular_keeps_expanded_coordinates() {
-        let (start, end) = map_revcomp_interval(17, 35, SequenceTopology::Circular, 19);
-        assert_eq!(start, 4);
-        assert_eq!(end, 22);
-        assert!(end > 19);
-    }
-
-    #[test]
-    fn revcomp_with_overlap_outputs_revcomp_sidecars() {
-        let base = unique_test_path("qgrs_revcomp_overlap");
+    fn base_c_circular_inline_outputs_expanded_coordinates() {
+        let base = unique_test_path("qgrs_base_c_circular");
         let output = base.with_extension("csv");
         let output_str = output.to_string_lossy().into_owned();
-        let sequence = String::from_utf8(reverse_complement_lowercase(
-            b"ttggggaggggaggggaggggaaaaaaa",
-        ))
-        .unwrap();
         let result = run_with_owned_args(vec![
             "--sequence".to_string(),
-            sequence,
+            "CACCCCACCCCACCCCCCC".to_string(),
             "--min-tetrads".to_string(),
             "4".to_string(),
             "--min-score".to_string(),
             "17".to_string(),
-            "--revcomp".to_string(),
+            "--base".to_string(),
+            "c".to_string(),
+            "--circular".to_string(),
+            "--output".to_string(),
+            output_str,
+        ]);
+        assert!(result.is_ok());
+
+        let csv = fs::read_to_string(&output).expect("base c circular output");
+        assert!(csv.contains("\n17,35,19,4,1,1,1,84,CCCCACCCCACCCCACCCC\n"));
+
+        let _ = fs::remove_file(&output);
+    }
+
+    #[test]
+    fn base_c_with_overlap_outputs_primary_sidecars() {
+        let base = unique_test_path("qgrs_base_c_overlap");
+        let output = base.with_extension("csv");
+        let output_str = output.to_string_lossy().into_owned();
+        let result = run_with_owned_args(vec![
+            "--sequence".to_string(),
+            "AAAAAAACCCCTCCCCTCCCCTCCCCTT".to_string(),
+            "--min-tetrads".to_string(),
+            "4".to_string(),
+            "--min-score".to_string(),
+            "17".to_string(),
+            "--base".to_string(),
+            "C".to_string(),
             "--overlap".to_string(),
             "--output".to_string(),
             output_str,
         ]);
         assert!(result.is_ok());
 
-        let revcomp_output = revcomp_output_path(&output, OutputFormat::Csv);
-        assert!(fs::metadata(overlap_path(&revcomp_output, OutputFormat::Csv)).is_ok());
-        assert!(fs::metadata(family_path(&revcomp_output, OutputFormat::Csv)).is_ok());
+        let overlap_path = overlap_path(&output, OutputFormat::Csv);
+        let family_path = family_path(&output, OutputFormat::Csv);
+        assert!(fs::metadata(&overlap_path).is_ok());
+        assert!(fs::metadata(&family_path).is_ok());
+        let overlap = fs::read_to_string(&overlap_path).expect("overlap output");
+        assert!(overlap.contains("CCCCTCCCCTCCCCTCCCC"));
+        assert!(!overlap.contains("GGGGAGGGGAGGGGAGGGG"));
 
         let _ = fs::remove_file(&output);
-        let _ = fs::remove_file(overlap_path(&output, OutputFormat::Csv));
-        let _ = fs::remove_file(family_path(&output, OutputFormat::Csv));
-        let _ = fs::remove_file(&revcomp_output);
-        let _ = fs::remove_file(overlap_path(&revcomp_output, OutputFormat::Csv));
-        let _ = fs::remove_file(family_path(&revcomp_output, OutputFormat::Csv));
+        let _ = fs::remove_file(overlap_path);
+        let _ = fs::remove_file(family_path);
     }
 
     #[test]
@@ -1166,12 +1013,12 @@ mod tests {
         assert!(stream_result.is_ok());
 
         for filename in [
-            "chr1.csv",
-            "chr1.overlap.csv",
-            "chr1.family.csv",
-            "chr2.csv",
-            "chr2.overlap.csv",
-            "chr2.family.csv",
+            "chr1.g4.csv",
+            "chr1.g4.overlap.csv",
+            "chr1.g4.family.csv",
+            "chr2.g4.csv",
+            "chr2.g4.overlap.csv",
+            "chr2.g4.family.csv",
         ] {
             let mmap_contents = fs::read_to_string(mmap_dir.join(filename)).unwrap();
             let stream_contents = fs::read_to_string(stream_dir.join(filename)).unwrap();
@@ -1184,15 +1031,15 @@ mod tests {
     }
 
     #[test]
-    fn revcomp_file_outputs_match_between_mmap_and_stream() {
-        let fasta = unique_test_path("qgrs_revcomp_modes").with_extension("fa");
+    fn base_c_file_outputs_match_between_mmap_and_stream() {
+        let fasta = unique_test_path("qgrs_base_c_modes").with_extension("fa");
         fs::write(
             &fasta,
             b">chr1\nAAACCCTCCCCTCCCCTCCCCAAA\n>chr2\nTTTTCCCCCTCCCCTCCCCTCCCCGG\n",
         )
         .unwrap();
-        let mmap_dir = unique_test_path("qgrs_revcomp_mmap_out");
-        let stream_dir = unique_test_path("qgrs_revcomp_stream_out");
+        let mmap_dir = unique_test_path("qgrs_base_c_mmap_out");
+        let stream_dir = unique_test_path("qgrs_base_c_stream_out");
         fs::create_dir_all(&mmap_dir).unwrap();
         fs::create_dir_all(&stream_dir).unwrap();
 
@@ -1211,7 +1058,8 @@ mod tests {
             "4".to_string(),
             "--min-score".to_string(),
             "17".to_string(),
-            "--revcomp".to_string(),
+            "--base".to_string(),
+            "c".to_string(),
             "--overlap".to_string(),
         ]);
         assert!(mmap_result.is_ok());
@@ -1227,29 +1075,26 @@ mod tests {
             "4".to_string(),
             "--min-score".to_string(),
             "17".to_string(),
-            "--revcomp".to_string(),
+            "--base".to_string(),
+            "c".to_string(),
             "--overlap".to_string(),
         ]);
         assert!(stream_result.is_ok());
 
         for filename in [
-            "chr1.csv",
-            "chr1.overlap.csv",
-            "chr1.family.csv",
-            "chr1.revcomp.csv",
-            "chr1.revcomp.overlap.csv",
-            "chr1.revcomp.family.csv",
-            "chr2.csv",
-            "chr2.overlap.csv",
-            "chr2.family.csv",
-            "chr2.revcomp.csv",
-            "chr2.revcomp.overlap.csv",
-            "chr2.revcomp.family.csv",
+            "chr1.i-motif.csv",
+            "chr1.i-motif.overlap.csv",
+            "chr1.i-motif.family.csv",
+            "chr2.i-motif.csv",
+            "chr2.i-motif.overlap.csv",
+            "chr2.i-motif.family.csv",
         ] {
             let mmap_contents = fs::read_to_string(mmap_dir.join(filename)).unwrap();
             let stream_contents = fs::read_to_string(stream_dir.join(filename)).unwrap();
             assert_eq!(mmap_contents, stream_contents, "mismatch for {filename}");
         }
+        let chr2 = fs::read_to_string(mmap_dir.join("chr2.i-motif.csv")).unwrap();
+        assert!(chr2.contains("CCCCTCCCCTCCCCTCCCC"));
 
         let _ = fs::remove_file(&fasta);
         let _ = fs::remove_dir_all(&mmap_dir);
@@ -1303,12 +1148,12 @@ mod tests {
         assert!(stream_result.is_ok());
 
         for filename in [
-            "chr1.csv",
-            "chr1.overlap.csv",
-            "chr1.family.csv",
-            "chr2.csv",
-            "chr2.overlap.csv",
-            "chr2.family.csv",
+            "chr1.g4.csv",
+            "chr1.g4.overlap.csv",
+            "chr1.g4.family.csv",
+            "chr2.g4.csv",
+            "chr2.g4.overlap.csv",
+            "chr2.g4.family.csv",
         ] {
             let mmap_contents = fs::read_to_string(mmap_dir.join(filename)).unwrap();
             let stream_contents = fs::read_to_string(stream_dir.join(filename)).unwrap();

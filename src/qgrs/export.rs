@@ -27,12 +27,12 @@ pub fn render_family_ranges_csv_with_projection(
 }
 
 pub fn render_csv_results(g4s: &[G4]) -> String {
-    let mut out = String::from("start,end,length,tetrads,y1,y2,y3,gscore,sequence\n");
+    let mut out = String::from("start,end,length,tetrads,y1,y2,y3,score,sequence\n");
     for g4 in g4s {
         let sequence_field = escape_csv_field(g4.sequence());
         out.push_str(&format!(
             "{},{},{},{},{},{},{},{},{}\n",
-            g4.start, g4.end, g4.length, g4.tetrads, g4.y1, g4.y2, g4.y3, g4.gscore, sequence_field
+            g4.start, g4.end, g4.length, g4.tetrads, g4.y1, g4.y2, g4.y3, g4.score, sequence_field
         ));
     }
     out
@@ -166,7 +166,7 @@ fn write_parquet_from_results<W: Write + Send + 'static>(
         Field::new("y1", DataType::Int32, false),
         Field::new("y2", DataType::Int32, false),
         Field::new("y3", DataType::Int32, false),
-        Field::new("gscore", DataType::Int32, false),
+        Field::new("score", DataType::Int32, false),
         Field::new("sequence", DataType::Utf8, false),
     ]));
 
@@ -177,7 +177,7 @@ fn write_parquet_from_results<W: Write + Send + 'static>(
     let y1s: Vec<i32> = g4s.iter().map(|g| g.y1).collect();
     let y2s: Vec<i32> = g4s.iter().map(|g| g.y2).collect();
     let y3s: Vec<i32> = g4s.iter().map(|g| g.y3).collect();
-    let gscores: Vec<i32> = g4s.iter().map(|g| g.gscore).collect();
+    let scores: Vec<i32> = g4s.iter().map(|g| g.score).collect();
     let sequences: Vec<String> = g4s.iter().map(|g| g.sequence().to_string()).collect();
 
     let columns: Vec<ArrayRef> = vec![
@@ -188,7 +188,7 @@ fn write_parquet_from_results<W: Write + Send + 'static>(
         Arc::new(Int32Array::from(y1s)),
         Arc::new(Int32Array::from(y2s)),
         Arc::new(Int32Array::from(y3s)),
-        Arc::new(Int32Array::from(gscores)),
+        Arc::new(Int32Array::from(scores)),
         Arc::new(StringArray::from(sequences)),
     ];
 

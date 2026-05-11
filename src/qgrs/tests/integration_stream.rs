@@ -39,7 +39,7 @@ fn stream_pipeline_matches_batch_results() {
             assert_eq!(lhs.end, rhs.end);
             assert_eq!(lhs.sequence(), rhs.sequence());
             assert_eq!(lhs.tetrads, rhs.tetrads);
-            assert_eq!(lhs.gscore, rhs.gscore);
+            assert_eq!(lhs.score, rhs.score);
         }
     }
     fs::remove_file(&path).unwrap();
@@ -124,7 +124,7 @@ fn stream_pipeline_matches_batch_results_in_circular_mode() {
             assert_eq!(lhs.length, rhs.length);
             assert_eq!(lhs.sequence(), rhs.sequence());
             assert_eq!(lhs.tetrads, rhs.tetrads);
-            assert_eq!(lhs.gscore, rhs.gscore);
+            assert_eq!(lhs.score, rhs.score);
             assert_eq!(lhs.y1, rhs.y1);
             assert_eq!(lhs.y2, rhs.y2);
             assert_eq!(lhs.y3, rhs.y3);
@@ -165,7 +165,7 @@ fn stream_pipeline_reads_gzip_and_matches_plain_results() {
             assert_eq!(lhs.length, rhs.length);
             assert_eq!(lhs.sequence(), rhs.sequence());
             assert_eq!(lhs.tetrads, rhs.tetrads);
-            assert_eq!(lhs.gscore, rhs.gscore);
+            assert_eq!(lhs.score, rhs.score);
             assert_eq!(lhs.y1, rhs.y1);
             assert_eq!(lhs.y2, rhs.y2);
             assert_eq!(lhs.y3, rhs.y3);

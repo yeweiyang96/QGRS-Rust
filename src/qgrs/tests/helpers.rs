@@ -21,7 +21,7 @@ pub(super) fn g4_signatures(g4s: &[G4]) -> Vec<G4Signature> {
                 g.y1,
                 g.y2,
                 g.y3,
-                g.gscore,
+                g.score,
                 g.sequence().to_string(),
             )
         })

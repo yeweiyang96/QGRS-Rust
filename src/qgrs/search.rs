@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use memchr::memchr2;
 
-use crate::qgrs::data::{ScanLimits, SequenceData, SequenceSlice, is_g};
+use crate::qgrs::data::{QuartetBase, ScanLimits, SequenceData, SequenceSlice};
 
 // Invariants for the raw-search layer:
 // 1. All coordinates remain 0-based half-open internally. `G4::start` is adjusted
@@ -34,7 +34,7 @@ pub struct G4 {
     pub y3: i32,
     pub tetrads: usize,
     pub length: usize,
-    pub gscore: i32,
+    pub score: i32,
     slice_start: usize,
     sequence_data: Arc<Vec<u8>>,
     slice_cache: OnceLock<SequenceSlice>,
@@ -57,7 +57,7 @@ impl G4 {
             y3: candidate.y3,
             tetrads: candidate.num_tetrads,
             length,
-            gscore: candidate.score(),
+            score: candidate.score(),
             slice_start: candidate.start,
             sequence_data: candidate.seq.normalized.clone(),
             slice_cache: OnceLock::new(),
@@ -93,7 +93,7 @@ impl Clone for G4 {
             y3: self.y3,
             tetrads: self.tetrads,
             length: self.length,
-            gscore: self.gscore,
+            score: self.score,
             slice_start: self.slice_start,
             sequence_data: self.sequence_data.clone(),
             slice_cache: OnceLock::new(),
@@ -111,10 +111,17 @@ struct G4Candidate {
     y2: i32,
     y3: i32,
     max_length: usize,
+    target_base: QuartetBase,
 }
 
 impl G4Candidate {
-    fn new(seq: Arc<SequenceData>, num_tetrads: usize, start: usize, limits: ScanLimits) -> Self {
+    fn new(
+        seq: Arc<SequenceData>,
+        num_tetrads: usize,
+        start: usize,
+        limits: ScanLimits,
+        target_base: QuartetBase,
+    ) -> Self {
         Self {
             seq,
             num_tetrads,
@@ -123,6 +130,7 @@ impl G4Candidate {
             y2: -1,
             y3: -1,
             max_length: maximum_length(num_tetrads, limits),
+            target_base,
         }
     }
 
@@ -233,7 +241,10 @@ impl G4Candidate {
             if p >= max_pos {
                 break;
             }
-            if seq[p..p + target_len].iter().all(|&b| b == b'g') {
+            if seq[p..p + target_len]
+                .iter()
+                .all(|&b| self.target_base.matches(b))
+            {
                 let y = (p - cursor) as i32;
                 if y >= min_loop && (p - self.start + target_len - 1) < self.max_length {
                     ys.push(y);
@@ -271,33 +282,43 @@ impl G4Candidate {
     }
 }
 
-pub(crate) struct GRunScanner<'a> {
+pub(crate) struct BaseRunScanner<'a> {
     data: &'a [u8],
     cursor: usize,
     min_tetrads: usize,
+    target_base: QuartetBase,
 }
 
-impl<'a> GRunScanner<'a> {
-    pub(crate) fn new(data: &'a [u8], min_tetrads: usize) -> Self {
+impl<'a> BaseRunScanner<'a> {
+    pub(crate) fn new(data: &'a [u8], min_tetrads: usize, target_base: QuartetBase) -> Self {
         Self {
             data,
             cursor: 0,
             min_tetrads,
+            target_base,
         }
     }
 }
 
-impl<'a> Iterator for GRunScanner<'a> {
+impl<'a> Iterator for BaseRunScanner<'a> {
     type Item = (usize, usize);
 
     fn next(&mut self) -> Option<Self::Item> {
         let len = self.data.len();
         while self.cursor < len {
             let search_slice = &self.data[self.cursor..];
-            let relative = memchr2(b'g', b'G', search_slice)?;
+            let relative = memchr2(
+                self.target_base.lowercase_byte(),
+                self.target_base.uppercase_byte(),
+                search_slice,
+            )?;
             let run_start = self.cursor + relative;
             let mut run_end = run_start;
-            while run_end < len && is_g(unsafe { *self.data.get_unchecked(run_end) }) {
+            while run_end < len
+                && self
+                    .target_base
+                    .matches(unsafe { *self.data.get_unchecked(run_end) })
+            {
                 run_end += 1;
             }
             self.cursor = if run_end < len { run_end + 1 } else { len };
@@ -320,10 +341,11 @@ pub(crate) fn find_raw_bytes_no_chunking(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    target_base: QuartetBase,
 ) -> Vec<G4> {
     sequence.make_ascii_lowercase();
     let seq = Arc::new(SequenceData::from_bytes(Arc::new(sequence)));
-    find_raw_with_sequence(seq, min_tetrads, min_score, limits)
+    find_raw_with_sequence(seq, min_tetrads, min_score, limits, target_base)
 }
 
 pub(crate) fn find_raw_on_window_bytes(
@@ -334,6 +356,7 @@ pub(crate) fn find_raw_on_window_bytes(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    target_base: QuartetBase,
 ) -> Vec<G4> {
     // Called by chunked batch scans only. The chunk scheduler already shapes
     // windows as (primary, primary+overlap) and expects this function to avoid
@@ -341,12 +364,12 @@ pub(crate) fn find_raw_on_window_bytes(
     // double-count.
     let window = &seq.normalized[base_offset..window_end];
     let mut cands = VecDeque::new();
-    let mut max_tetrads_allowed = limits.max_g_run;
+    let mut max_tetrads_allowed = limits.max_run;
     if limits.max_g4_length >= 4 {
         max_tetrads_allowed = max_tetrads_allowed.min(limits.max_g4_length / 4);
     }
     if max_tetrads_allowed >= min_tetrads {
-        for (run_start_rel, run_len) in GRunScanner::new(window, min_tetrads) {
+        for (run_start_rel, run_len) in BaseRunScanner::new(window, min_tetrads, target_base) {
             let run_start = base_offset + run_start_rel;
             if run_start >= primary_end {
                 continue;
@@ -364,7 +387,13 @@ pub(crate) fn find_raw_on_window_bytes(
                 let allowed_offset = base_max_offset.min(boundary_offset);
                 for offset in 0..=allowed_offset {
                     let start = run_start + offset;
-                    cands.push_back(G4Candidate::new(seq.clone(), tetrads, start, limits));
+                    cands.push_back(G4Candidate::new(
+                        seq.clone(),
+                        tetrads,
+                        start,
+                        limits,
+                        target_base,
+                    ));
                 }
                 tetrads += 1;
             }
@@ -393,9 +422,10 @@ pub(crate) fn find_raw_with_sequence(
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
+    target_base: QuartetBase,
 ) -> Vec<G4> {
     let mut cands = VecDeque::new();
-    seed_queue(&mut cands, seq.clone(), min_tetrads, limits);
+    seed_queue(&mut cands, seq.clone(), min_tetrads, limits, target_base);
     let mut raw_g4s = Vec::new();
     while let Some(cand) = cands.pop_front() {
         if cand.complete() {
@@ -418,15 +448,16 @@ fn seed_queue(
     seq: Arc<SequenceData>,
     min_tetrads: usize,
     limits: ScanLimits,
+    target_base: QuartetBase,
 ) {
-    let mut max_tetrads_allowed = limits.max_g_run;
+    let mut max_tetrads_allowed = limits.max_run;
     if limits.max_g4_length >= 4 {
         max_tetrads_allowed = max_tetrads_allowed.min(limits.max_g4_length / 4);
     }
     if max_tetrads_allowed < min_tetrads {
         return;
     }
-    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads) {
+    for (run_start, run_len) in BaseRunScanner::new(&seq.normalized, min_tetrads, target_base) {
         let max_tetrads_for_run = run_len.min(max_tetrads_allowed);
         let mut tetrads = min_tetrads;
         while tetrads <= max_tetrads_for_run {
@@ -436,7 +467,13 @@ fn seed_queue(
             let max_offset = run_len.saturating_sub(tetrads);
             for offset in 0..=max_offset {
                 let start = run_start + offset;
-                cands.push_back(G4Candidate::new(seq.clone(), tetrads, start, limits));
+                cands.push_back(G4Candidate::new(
+                    seq.clone(),
+                    tetrads,
+                    start,
+                    limits,
+                    target_base,
+                ));
             }
             tetrads += 1;
         }

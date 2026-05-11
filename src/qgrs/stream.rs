@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rayon::spawn;
 
 use super::{
-    G4, ScanLimits, SequenceTopology, chunk_size_for_limits, compute_chunk_overlap,
+    G4, QuartetBase, ScanLimits, SequenceTopology, chunk_size_for_limits, compute_chunk_overlap,
     consolidate_g4s_with_topology, find_raw_bytes_no_chunking, input::open_input_reader,
     parse_chrom_name, retain_circular_raw_hits, shift_g4,
 };
@@ -119,6 +119,30 @@ where
     )
 }
 
+pub fn process_fasta_stream_with_limits_topology_and_len_with_base<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    target_base: QuartetBase,
+    mut on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, Vec<G4>, usize) -> io::Result<()>,
+{
+    let reader = open_input_reader(path)?;
+    process_reader_with_limits_topology_and_len_with_base(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        topology,
+        target_base,
+        &mut on_chromosome,
+    )
+}
+
 pub fn process_fasta_stream_with_limits_topology_and_sequence<F>(
     path: &Path,
     min_tetrads: usize,
@@ -201,6 +225,30 @@ where
         min_score,
         limits,
         topology,
+        &mut on_chromosome,
+    )
+}
+
+pub fn process_fasta_stream_with_limits_overlap_topology_and_len_with_base<F>(
+    path: &Path,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    target_base: QuartetBase,
+    mut on_chromosome: F,
+) -> io::Result<usize>
+where
+    F: FnMut(String, StreamChromosomeResults, usize) -> io::Result<()>,
+{
+    let reader = open_input_reader(path)?;
+    process_reader_with_limits_overlap_topology_and_len_with_base(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        topology,
+        target_base,
         &mut on_chromosome,
     )
 }
@@ -356,11 +404,35 @@ where
 }
 
 fn process_reader_with_limits_topology_and_len<R, F>(
+    reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, Vec<G4>, usize) -> io::Result<()>,
+{
+    process_reader_with_limits_topology_and_len_with_base(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        topology,
+        QuartetBase::G,
+        on_chromosome,
+    )
+}
+
+fn process_reader_with_limits_topology_and_len_with_base<R, F>(
     mut reader: R,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
     topology: SequenceTopology,
+    target_base: QuartetBase,
     on_chromosome: &mut F,
 ) -> io::Result<usize>
 where
@@ -383,24 +455,26 @@ where
             }
             chrom_index += 1;
             let name = parse_chrom_name(&line, chrom_index);
-            current = Some(StreamChromosome::new(
+            current = Some(StreamChromosome::new_with_base(
                 name,
                 min_tetrads,
                 min_score,
                 limits,
                 topology,
+                target_base,
             ));
             continue;
         }
         if current.is_none() {
             chrom_index += 1;
             let fallback = format!("chromosome_{}", chrom_index);
-            current = Some(StreamChromosome::new(
+            current = Some(StreamChromosome::new_with_base(
                 fallback,
                 min_tetrads,
                 min_score,
                 limits,
                 topology,
+                target_base,
             ));
         }
         if let Some(chrom) = current.as_mut() {
@@ -580,11 +654,35 @@ where
 }
 
 fn process_reader_with_limits_overlap_topology_and_len<R, F>(
+    reader: R,
+    min_tetrads: usize,
+    min_score: i32,
+    limits: ScanLimits,
+    topology: SequenceTopology,
+    on_chromosome: &mut F,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    F: FnMut(String, StreamChromosomeResults, usize) -> io::Result<()>,
+{
+    process_reader_with_limits_overlap_topology_and_len_with_base(
+        reader,
+        min_tetrads,
+        min_score,
+        limits,
+        topology,
+        QuartetBase::G,
+        on_chromosome,
+    )
+}
+
+fn process_reader_with_limits_overlap_topology_and_len_with_base<R, F>(
     mut reader: R,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
     topology: SequenceTopology,
+    target_base: QuartetBase,
     on_chromosome: &mut F,
 ) -> io::Result<usize>
 where
@@ -607,24 +705,26 @@ where
             }
             chrom_index += 1;
             let name = parse_chrom_name(&line, chrom_index);
-            current = Some(StreamChromosome::new(
+            current = Some(StreamChromosome::new_with_base(
                 name,
                 min_tetrads,
                 min_score,
                 limits,
                 topology,
+                target_base,
             ));
             continue;
         }
         if current.is_none() {
             chrom_index += 1;
             let fallback = format!("chromosome_{}", chrom_index);
-            current = Some(StreamChromosome::new(
+            current = Some(StreamChromosome::new_with_base(
                 fallback,
                 min_tetrads,
                 min_score,
                 limits,
                 topology,
+                target_base,
             ));
         }
         if let Some(chrom) = current.as_mut() {
@@ -729,7 +829,33 @@ impl StreamChromosome {
         limits: ScanLimits,
         topology: SequenceTopology,
     ) -> Self {
-        Self::new_with_sequence_capture(name, min_tetrads, min_score, limits, topology, false)
+        Self::new_with_base(
+            name,
+            min_tetrads,
+            min_score,
+            limits,
+            topology,
+            QuartetBase::G,
+        )
+    }
+
+    fn new_with_base(
+        name: String,
+        min_tetrads: usize,
+        min_score: i32,
+        limits: ScanLimits,
+        topology: SequenceTopology,
+        target_base: QuartetBase,
+    ) -> Self {
+        Self::new_with_sequence_capture_and_base(
+            name,
+            min_tetrads,
+            min_score,
+            limits,
+            topology,
+            false,
+            target_base,
+        )
     }
 
     fn new_with_sequence_capture(
@@ -740,9 +866,35 @@ impl StreamChromosome {
         topology: SequenceTopology,
         capture_sequence: bool,
     ) -> Self {
+        Self::new_with_sequence_capture_and_base(
+            name,
+            min_tetrads,
+            min_score,
+            limits,
+            topology,
+            capture_sequence,
+            QuartetBase::G,
+        )
+    }
+
+    fn new_with_sequence_capture_and_base(
+        name: String,
+        min_tetrads: usize,
+        min_score: i32,
+        limits: ScanLimits,
+        topology: SequenceTopology,
+        capture_sequence: bool,
+        target_base: QuartetBase,
+    ) -> Self {
         Self {
             name,
-            scheduler: StreamChunkScheduler::new(min_tetrads, min_score, limits, topology),
+            scheduler: StreamChunkScheduler::new(
+                min_tetrads,
+                min_score,
+                limits,
+                topology,
+                target_base,
+            ),
             captured_sequence: capture_sequence.then(Vec::new),
         }
     }
@@ -809,6 +961,7 @@ struct StreamChunkScheduler {
     min_score: i32,
     limits: ScanLimits,
     topology: SequenceTopology,
+    target_base: QuartetBase,
     chunk_size: usize,
     overlap: usize,
     buffer: VecDeque<u8>,
@@ -830,6 +983,7 @@ impl StreamChunkScheduler {
         min_score: i32,
         limits: ScanLimits,
         topology: SequenceTopology,
+        target_base: QuartetBase,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let chunk_size = chunk_size_for_limits(limits);
@@ -845,6 +999,7 @@ impl StreamChunkScheduler {
             min_score,
             limits,
             topology,
+            target_base,
             chunk_size,
             overlap,
             buffer: VecDeque::with_capacity(capacity),
@@ -914,12 +1069,14 @@ impl StreamChunkScheduler {
         let min_tetrads = self.min_tetrads;
         let min_score = self.min_score;
         let limits = self.limits;
+        let target_base = self.target_base;
         let tx = self.tx.clone();
         self.inflight += 1;
         spawn(move || {
             // Use the no-chunking variant here: the scheduler already supplied
             // a window (primary + overlap) and we must not re-chunk it.
-            let mut hits = find_raw_bytes_no_chunking(chunk, min_tetrads, min_score, limits);
+            let mut hits =
+                find_raw_bytes_no_chunking(chunk, min_tetrads, min_score, limits, target_base);
             for g4 in &mut hits {
                 shift_g4(g4, offset);
             }
@@ -981,8 +1138,13 @@ impl StreamChunkScheduler {
         let mut boundary = Vec::with_capacity(self.circular_tail.len() + self.circular_head.len());
         boundary.extend(self.circular_tail.iter().copied());
         boundary.extend(self.circular_head.iter().copied());
-        let mut hits =
-            find_raw_bytes_no_chunking(boundary, self.min_tetrads, self.min_score, self.limits);
+        let mut hits = find_raw_bytes_no_chunking(
+            boundary,
+            self.min_tetrads,
+            self.min_score,
+            self.limits,
+            self.target_base,
+        );
         let offset = self.sequence_len.saturating_sub(self.circular_tail.len());
         for g4 in &mut hits {
             shift_g4(g4, offset);

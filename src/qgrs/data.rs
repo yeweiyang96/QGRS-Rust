@@ -19,6 +19,46 @@ impl SequenceTopology {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuartetBase {
+    G,
+    C,
+}
+
+impl QuartetBase {
+    pub const fn lowercase_byte(self) -> u8 {
+        match self {
+            Self::G => b'g',
+            Self::C => b'c',
+        }
+    }
+
+    pub const fn uppercase_byte(self) -> u8 {
+        match self {
+            Self::G => b'G',
+            Self::C => b'C',
+        }
+    }
+
+    pub const fn cli_name(self) -> &'static str {
+        match self {
+            Self::G => "g",
+            Self::C => "c",
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn matches(self, byte: u8) -> bool {
+        byte == self.lowercase_byte() || byte == self.uppercase_byte()
+    }
+}
+
+impl Default for QuartetBase {
+    fn default() -> Self {
+        Self::G
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChromSequence {
     pub(crate) name: String,
@@ -46,26 +86,26 @@ impl ChromSequence {
 }
 
 pub const DEFAULT_MAX_G4_LENGTH: usize = 45;
-pub const DEFAULT_MAX_G_RUN: usize = 10;
+pub const DEFAULT_MAX_RUN: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScanLimits {
     pub max_g4_length: usize,
-    pub max_g_run: usize,
+    pub max_run: usize,
 }
 
 impl ScanLimits {
-    pub const fn new(max_g4_length: usize, max_g_run: usize) -> Self {
+    pub const fn new(max_g4_length: usize, max_run: usize) -> Self {
         Self {
             max_g4_length,
-            max_g_run,
+            max_run,
         }
     }
 }
 
 impl Default for ScanLimits {
     fn default() -> Self {
-        ScanLimits::new(DEFAULT_MAX_G4_LENGTH, DEFAULT_MAX_G_RUN)
+        ScanLimits::new(DEFAULT_MAX_G4_LENGTH, DEFAULT_MAX_RUN)
     }
 }
 
@@ -127,9 +167,4 @@ impl Hash for SequenceSlice {
         self.length.hash(state);
         state.write(self.bytes());
     }
-}
-
-#[inline(always)]
-pub(crate) fn is_g(byte: u8) -> bool {
-    byte == b'G' || byte == b'g'
 }

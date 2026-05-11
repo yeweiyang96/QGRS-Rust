@@ -4,8 +4,8 @@ use crate::qgrs::data::SequenceTopology;
 use crate::qgrs::search::G4;
 
 fn is_better_candidate(current: &G4, candidate: &G4) -> bool {
-    candidate.gscore > current.gscore
-        || (candidate.gscore == current.gscore && candidate.length < current.length)
+    candidate.score > current.score
+        || (candidate.score == current.score && candidate.length < current.length)
 }
 
 pub fn consolidate_g4s(raw_g4s: Vec<G4>) -> (Vec<G4>, Vec<(usize, usize)>) {

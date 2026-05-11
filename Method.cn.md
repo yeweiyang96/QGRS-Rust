@@ -4,7 +4,7 @@ BFS（广度优先搜索）候选扩展是 QGRS-Rust 核心搜索逻辑，用于
 
 ### 1.1 种子生成（seed_queue）
 
-**目标**：扫描序列识别所有潜在的 G-run（连续 G 碱基），并在「允许的 tetrad 数量 × 允许的偏移」笛卡尔积上生成初始候选。所有后续 BFS 扩展都建立在这些种子之上。
+**目标**：扫描序列识别所有潜在的 target-base run（连续 G 碱基），并在「允许的 tetrad 数量 × 允许的偏移」笛卡尔积上生成初始候选。所有后续 BFS 扩展都建立在这些种子之上。
 
 **实现细节**：
 ```rust
@@ -14,8 +14,8 @@ fn seed_queue(
     min_tetrads: usize,
     limits: ScanLimits,
 ) {
-    // 限制 tetrad 数，避免生成超过 max_g_run 或 max_g4_length/4 的种子
-    let mut max_tetrads_allowed = limits.max_g_run;
+    // 限制 tetrad 数，避免生成超过 max_run 或 max_g4_length/4 的种子
+    let mut max_tetrads_allowed = limits.max_run;
     if limits.max_g4_length >= 4 {
         max_tetrads_allowed = max_tetrads_allowed.min(limits.max_g4_length / 4);
     }
@@ -23,7 +23,7 @@ fn seed_queue(
         return;
     }
 
-    for (run_start, run_len) in GRunScanner::new(&seq.normalized, min_tetrads) {
+    for (run_start, run_len) in BaseRunScanner::new(&seq.normalized, min_tetrads) {
         let max_tetrads_for_run = run_len.min(max_tetrads_allowed);
         let mut tetrads = min_tetrads;
         while tetrads <= max_tetrads_for_run {
@@ -42,12 +42,12 @@ fn seed_queue(
 ```
 
 **关键优化**：
-- `GRunScanner::new(&seq.normalized, min_tetrads)` 仍基于 `memchr2(b'g', b'G')`，但现在仅返回长度≥`min_tetrads` 的 run，减少了上层过滤成本；SIMD 扫描相较逐字节检查快约 10×。
-- `max_tetrads_allowed = min(max_g_run, max_g4_length/4)` 把 G-run 长度与整体长度约束结合起来，防止生成无法通过后续 `max_length` 检查的冗余种子。
-- 当 run 长度超过 `max_g_run` 时，`run_len.min(max_tetrads_allowed)` 会截断可用 tetrad 数，但随后的偏移枚举依旧覆盖整段 G-run，使得“大于最大连续 G 限制”的长 run 只会以受限窗口形式进入 BFS，而不会完全丢失。
+- `BaseRunScanner::new(&seq.normalized, min_tetrads)` 仍基于 `memchr2(target_base.lowercase_byte(), target_base.uppercase_byte())`，但现在仅返回长度≥`min_tetrads` 的 run，减少了上层过滤成本；SIMD 扫描相较逐字节检查快约 10×。
+- `max_tetrads_allowed = min(max_run, max_g4_length/4)` 把 target-base run 长度与整体长度约束结合起来，防止生成无法通过后续 `max_length` 检查的冗余种子。
+- 当 run 长度超过 `max_run` 时，`run_len.min(max_tetrads_allowed)` 会截断可用 tetrad 数，但随后的偏移枚举依旧覆盖整段 target-base run，使得“大于最大连续 G 限制”的长 run 只会以受限窗口形式进入 BFS，而不会完全丢失。
 - 对每个 run，在有效 tetrad 数范围内再枚举所有偏移，确保诸如 `GGGGG` 这类长 run 会覆盖所有子区间，而不用多次扫描序列。
 
-**示例**（`min_tetrads=2`, `max_g_run=5`, `max_g4_length=40`）：
+**示例**（`min_tetrads=2`, `max_run=5`, `max_g4_length=40`）：
 - 序列片段：`GGGGG...`（run_len=5）
 - 有效 tetrad 数：2、3、4、5（受 `max_g4_length` 约束，4×5=20 ≤ 40）
 - 对于 tetrad=3，允许的偏移为 `0..=2`，因此会生成 3 个起点：`start`, `start+1`, `start+2`
@@ -116,7 +116,7 @@ impl G4Candidate {
 
 ### 1.3 Loop 发现机制（expand）
 
-**目标**：从候选当前状态（已分配部分 loop）向前扫描下一个 G-run，为下一个 loop 枚举所有合法长度。
+**目标**：从候选当前状态（已分配部分 loop）向前扫描下一个 target-base run，为下一个 loop 枚举所有合法长度。
 
 **实现细节**：
 ```rust
@@ -148,7 +148,7 @@ fn find_loop_lengths_from(cursor: usize, data: &SequenceData, limits: &ScanLimit
     let min_len = cand.min_acceptable_loop_length();  // 0 或 1（若已有 loop=0）
     let max_len = limits.max_length - cand.partial_length() - cand.tetrad_len;
     
-    // 从 cursor 向前扫描，寻找长度为 tetrad_len 的 G-run
+    // 从 cursor 向前扫描，寻找长度为 tetrad_len 的 target-base run
     for y in min_len..=max_len {
         let tetrad_start = cursor + y;
         if is_valid_tetrad_at(tetrad_start, cand.tetrad_len, data) {
@@ -167,7 +167,7 @@ fn find_loop_lengths_from(cursor: usize, data: &SequenceData, limits: &ScanLimit
 **示例扩展**：
 - 候选状态：`start=212, tetrad_len=3, y1=5` (已分配第一个 loop)
 - cursor = 212 + 3 + 5 = 220（第二个 tetrad 应从此开始）
-- 假设在 220 和 222 处各找到长度为 3 的 G-run
+- 假设在 220 和 222 处各找到长度为 3 的 target-base run
 - 生成两个新候选：
   - `{start=212, tetrad=3, y1=5, y2=0}` (loop2 长度为 0)
   - `{start=212, tetrad=3, y1=5, y2=2}` (loop2 长度为 2)
@@ -227,21 +227,21 @@ legacy_cap(n) = 45, 当 n >= 3
 
 | tetrads | 允许总长度上限 | 分数影响 |
 | --- | --- | --- |
-| 2 | `<= 30` | `gscore = floor(21 - gavg)` |
-| 3 | `<= 45` | `gscore = floor(64 - gavg)` |
-| 4 | `<= 45` | `gscore = floor(84 - gavg)` |
-| 5 | `<= 45` | `gscore = floor(96 - gavg)` |
-| 6 | `<= 45` | `gscore = floor(100 - gavg)` |
-| 7 | `<= 45` | `gscore = floor(96 - gavg)` |
-| 8 | `<= 45` | `gscore = floor(84 - gavg)` |
-| 9 | `<= 45` | `gscore = floor(64 - gavg)` |
-| 10 | `<= 45` | `gscore = floor(36 - gavg)` |
+| 2 | `<= 30` | `score = floor(21 - gavg)` |
+| 3 | `<= 45` | `score = floor(64 - gavg)` |
+| 4 | `<= 45` | `score = floor(84 - gavg)` |
+| 5 | `<= 45` | `score = floor(96 - gavg)` |
+| 6 | `<= 45` | `score = floor(100 - gavg)` |
+| 7 | `<= 45` | `score = floor(96 - gavg)` |
+| 8 | `<= 45` | `score = floor(84 - gavg)` |
+| 9 | `<= 45` | `score = floor(64 - gavg)` |
+| 10 | `<= 45` | `score = floor(36 - gavg)` |
 
 说明：
 - 这里的 `gavg = (|y1-y2| + |y2-y3| + |y1-y3|) / 3`，表示 3 个 loop 长度不均匀性的惩罚项。
 - `2-tetrad` 候选默认只拿到 `30 bp` 的长度预算，所以即使把 `--max-g4-length` 从 `45` 提高到更大，它的打分和长度判定也不会继续放宽。
 - `3-tetrad` 及以上候选默认共享 `45 bp` 的长度预算；当 `--max-g4-length < 45` 时，它们的分数上限和可扩展 loop 空间会一起下降。
-- `--max-g4-length` 还会限制种子阶段允许枚举的最大 tetrads：`max_tetrads_allowed = min(max_g_run, floor(L/4))`。因此当 `L` 很小时，某些高 tetrad 候选会在 BFS 之前就不再生成。
+- `--max-g4-length` 还会限制种子阶段允许枚举的最大 tetrads：`max_tetrads_allowed = min(max_run, floor(L/4))`。因此当 `L` 很小时，某些高 tetrad 候选会在 BFS 之前就不再生成。
 
 **典型分数对比**（max_length=45, min_tetrads=2）：
 - `{tetrad=3, y1=5, y2=5, y3=5}`：gmax=32, gavg=0, bonus=32 → score=64
@@ -280,7 +280,7 @@ void findCandidates(const char* seq, int len) {
 **关键差异**：
 | 维度 | Rust | C++ |
 |------|------|-----|
-| G-run 扫描 | `memchr2` SIMD (~10x faster) | 逐字节 while 循环 |
+| target-base run 扫描 | `memchr2` SIMD (~10x faster) | 逐字节 while 循环 |
 | 队列类型 | `VecDeque<G4Candidate>` | `std::queue<Candidate>` |
 | 内存管理 | `Arc<Vec<u8>>` 零拷贝 | `std::string` 每次复制 |
 | 并行化 | Rayon 自动分块 | 单线程顺序执行 |
@@ -295,26 +295,26 @@ void findCandidates(const char* seq, int len) {
 
 **场景**：在位置 212 检测到 5 个连续 G
 - 序列：`...GGGGGACGTGGGACGTGGG...`
-- 参数：`min_tetrads=2, max_g_run=5, max_length=45`
+- 参数：`min_tetrads=2, max_run=5, max_length=45`
 
 **BFS 扩展过程**：
 1. **种子**：生成 4 个候选（offset 0-3 对应 tetrad=2,3,4,5）
 2. **第一轮扩展**（填充 y1）：
-   - 候选 `{212, tetrad=3}` 在位置 220 找到 G-run
+   - 候选 `{212, tetrad=3}` 在位置 220 找到 target-base run
    - 发现可行 y1 值：[5, 6, 7]（对应位置 220, 221, 222 的 tetrad）
 3. **第二轮扩展**（填充 y2）：
    - 候选 `{212, tetrad=3, y1=5}` 扩展为：
-     - `{..., y1=5, y2=2}` (gscore=19)
-     - `{..., y1=5, y2=5}` (gscore=17)
+     - `{..., y1=5, y2=2}` (score=19)
+     - `{..., y1=5, y2=5}` (score=17)
 4. **第三轮扩展**（填充 y3）：
    - 候选 `{..., y1=5, y2=2}` 最终扩展为：
-     - `{..., y1=5, y2=2, y3=5}` (gscore=19, length=27)
+     - `{..., y1=5, y2=2, y3=5}` (score=19, length=27)
 5. **收录**：通过 `viable()` 检查（length≤45, score≥0），加入 `raw_g4s`
 
 **去重结果**：
 - 原始产出包含多个 `start=212` 候选（不同 loop 配置）
-- `consolidate_g4s` 第一阶段去重保留 gscore=19 版本（HashMap Entry API）
-- 最终输出：`start=212, length=27, tetrads=3, y1=5, y2=2, y3=5, gscore=19`
+- `consolidate_g4s` 第一阶段去重保留 score=19 版本（HashMap Entry API）
+- 最终输出：`start=212, length=27, tetrads=3, y1=5, y2=2, y3=5, score=19`
 
 ---
 ## 2. 家族合并（consolidate_g4s）详解
@@ -340,16 +340,16 @@ for g in raw_g4s.into_iter() {
     match best_by_key.entry(key) {
         Entry::Vacant(slot) => slot.insert(g),
         Entry::Occupied(mut slot) => {
-            if g.gscore > slot.get().gscore {
+            if g.score > slot.get().score {
                 slot.insert(g);  // 替换为更高分版本
             }
         }
     }
 }
 ```
-对同 key 的多个候选保留最高 gscore 版本
+对同 key 的多个候选保留最高 score 版本
 
-**为何需要**：BFS 可能产生坐标相同但 loop 配置不同的候选（如 start=212的 `y1=5,y2=2,y3=5 gscore=19` vs `y1=5,y2=1,y3=6 gscore=17`），HashMap 确保只保留最优配置. HashMap 查找是 O(1)，而 C++ 的 set 是 O(log n)
+**为何需要**：BFS 可能产生坐标相同但 loop 配置不同的候选（如 start=212的 `y1=5,y2=2,y3=5 score=19` vs `y1=5,y2=1,y3=6 score=17`），HashMap 确保只保留最优配置. HashMap 查找是 O(1)，而 C++ 的 set 是 O(log n)
 
 
 ### 阶段2 - 分组：
@@ -395,15 +395,15 @@ for g4 in deduped.into_iter() {
 **顺序依赖性**：去重后必须按 `(start, end)` 排序，否则同一批候选在 chunk/stream 模式下因迭代顺序不同可能被分到不同家族，导致输出不一致
 
 ### 阶段3 - 择优：
-每个家族选最高 gscore 成员输出
+每个家族选最高 score 成员输出
 生物学原理：重叠结构可能代表同一特征，选最佳配置
 
 ### 2.1 元数据导出与 `--overlap`
 
 `consolidate_g4s` 现在同时返回 `(Vec<G4>, Vec<(usize, usize)>)`：第一项是家族优胜者，第二项记录每个家族的 `[start,end]` 范围。CLI 的 `--overlap` 标志会在写入主 CSV/Parquet 的同时追加两类调试文件：
 
-1. `{base}.overlap.csv`：使用 `render_csv_results` 直接 dump 排序后的 raw hits；字段与主 CSV 完全一致，方便做 diff。
-2. `{base}.family.csv`：通过 `render_family_ranges_csv` 输出 `family_index,start,end`，可迅速定位哪些家族被合并。
+1. `{seqid}.{motif}.overlap.csv`：使用 `render_csv_results` 直接 dump 排序后的 raw hits；字段与主 CSV 完全一致，方便做 diff。
+2. `{seqid}.{motif}.family.csv`：通过 `render_family_ranges_csv` 输出 `family_index,start,end`，可迅速定位哪些家族被合并。
 
 流式管线通过 `StreamChromosomeResults` 把 `hits`、`family_ranges` 以及可选的 `raw_hits` 传给回调：
 
