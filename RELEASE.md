@@ -1,6 +1,6 @@
 # Release Notes
 
-## Base-selectable G4/i-motif scanning
+## v1.6.3 - Base-selectable G4/i-motif scanning
 
 This release replaces the old reverse-complement workflow with direct target-base scanning on the original input sequence. It is a breaking CLI and output-schema update.
 
