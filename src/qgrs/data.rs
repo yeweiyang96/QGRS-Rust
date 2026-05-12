@@ -19,8 +19,9 @@ impl SequenceTopology {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QuartetBase {
+    #[default]
     G,
     C,
 }
@@ -50,12 +51,6 @@ impl QuartetBase {
     #[inline(always)]
     pub(crate) fn matches(self, byte: u8) -> bool {
         byte == self.lowercase_byte() || byte == self.uppercase_byte()
-    }
-}
-
-impl Default for QuartetBase {
-    fn default() -> Self {
-        Self::G
     }
 }
 

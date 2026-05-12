@@ -348,11 +348,26 @@ pub(crate) fn find_raw_bytes_no_chunking(
     find_raw_with_sequence(seq, min_tetrads, min_score, limits, target_base)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RawSearchWindow {
+    pub(crate) base_offset: usize,
+    pub(crate) primary_end: usize,
+    pub(crate) window_end: usize,
+}
+
+impl RawSearchWindow {
+    pub(crate) const fn new(base_offset: usize, primary_end: usize, window_end: usize) -> Self {
+        Self {
+            base_offset,
+            primary_end,
+            window_end,
+        }
+    }
+}
+
 pub(crate) fn find_raw_on_window_bytes(
     seq: Arc<SequenceData>,
-    base_offset: usize,
-    primary_end: usize,
-    window_end: usize,
+    window_bounds: RawSearchWindow,
     min_tetrads: usize,
     min_score: i32,
     limits: ScanLimits,
@@ -362,7 +377,7 @@ pub(crate) fn find_raw_on_window_bytes(
     // windows as (primary, primary+overlap) and expects this function to avoid
     // emitting hits whose start ≥ primary_end so that overlap regions don't
     // double-count.
-    let window = &seq.normalized[base_offset..window_end];
+    let window = &seq.normalized[window_bounds.base_offset..window_bounds.window_end];
     let mut cands = VecDeque::new();
     let mut max_tetrads_allowed = limits.max_run;
     if limits.max_g4_length >= 4 {
@@ -370,8 +385,8 @@ pub(crate) fn find_raw_on_window_bytes(
     }
     if max_tetrads_allowed >= min_tetrads {
         for (run_start_rel, run_len) in BaseRunScanner::new(window, min_tetrads, target_base) {
-            let run_start = base_offset + run_start_rel;
-            if run_start >= primary_end {
+            let run_start = window_bounds.base_offset + run_start_rel;
+            if run_start >= window_bounds.primary_end {
                 continue;
             }
             let max_tetrads_for_run = run_len.min(max_tetrads_allowed);
@@ -383,7 +398,7 @@ pub(crate) fn find_raw_on_window_bytes(
                 let base_max_offset = run_len.saturating_sub(tetrads);
                 // Ensure each raw hit is emitted by at most one window by
                 // clamping offsets to the primary section of the chunk.
-                let boundary_offset = primary_end.saturating_sub(run_start + 1);
+                let boundary_offset = window_bounds.primary_end.saturating_sub(run_start + 1);
                 let allowed_offset = base_max_offset.min(boundary_offset);
                 for offset in 0..=allowed_offset {
                     let start = run_start + offset;
@@ -413,7 +428,7 @@ pub(crate) fn find_raw_on_window_bytes(
             }
         }
     }
-    raw_g4s.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+    raw_g4s.sort_by_key(|a| (a.start, a.end));
     raw_g4s
 }
 
@@ -439,7 +454,7 @@ pub(crate) fn find_raw_with_sequence(
             }
         }
     }
-    raw_g4s.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+    raw_g4s.sort_by_key(|a| (a.start, a.end));
     raw_g4s
 }
 

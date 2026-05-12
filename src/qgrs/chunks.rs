@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::qgrs::data::{QuartetBase, ScanLimits, SequenceData, SequenceTopology};
-use crate::qgrs::search::{G4, find_raw_on_window_bytes, find_raw_with_sequence};
+use crate::qgrs::search::{G4, RawSearchWindow, find_raw_on_window_bytes, find_raw_with_sequence};
 
 const WINDOW_MIN_BP: usize = 32;
 const WINDOW_MAX_BP: usize = 64;
@@ -95,9 +95,7 @@ fn find_owned_bytes_linear(
             .flat_map_iter(|(offset, primary_end, window_end)| {
                 let hits = find_raw_on_window_bytes(
                     seq_data.clone(),
-                    offset,
-                    primary_end,
-                    window_end,
+                    RawSearchWindow::new(offset, primary_end, window_end),
                     min_tetrads,
                     min_score,
                     limits,
@@ -157,7 +155,7 @@ pub(crate) fn retain_circular_raw_hits(raw_hits: &mut Vec<G4>, sequence_len: usi
         return;
     }
     raw_hits.retain(|g4| g4.start <= sequence_len && g4.length <= sequence_len);
-    raw_hits.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+    raw_hits.sort_by_key(|a| (a.start, a.end));
 }
 
 pub(crate) fn chunk_size_for_limits(limits: ScanLimits) -> usize {

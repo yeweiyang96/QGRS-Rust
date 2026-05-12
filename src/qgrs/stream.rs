@@ -1111,7 +1111,7 @@ impl StreamChunkScheduler {
             self.append_wraparound_hits(&mut combined);
             retain_circular_raw_hits(&mut combined, self.sequence_len);
         } else {
-            combined.sort_by(|a, b| (a.start, a.end).cmp(&(b.start, b.end)));
+            combined.sort_by_key(|a| (a.start, a.end));
         }
         let raw_hits = if capture_raw {
             Some(combined.clone())
