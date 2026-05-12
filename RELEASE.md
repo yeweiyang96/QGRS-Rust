@@ -1,5 +1,24 @@
 # Release Notes
 
+## v1.6.4 - CI warning-gate compatibility
+
+This patch release keeps the `v1.6.3` base-selectable G4/i-motif behavior and updates the codebase for the current strict Clippy warning gate used by CI.
+
+### Fixes
+
+- Replaced tuple comparison `sort_by` calls with `sort_by_key` in search, chunk, and stream result ordering paths.
+- Derived `Default` for `QuartetBase` and marked `G` as the default variant.
+- Grouped chunk window bounds into `RawSearchWindow` so the raw window scanner stays under the Clippy argument-count limit without relaxing warnings.
+
+### Validation covered
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+git diff --check
+```
+
 ## v1.6.3 - Base-selectable G4/i-motif scanning
 
 This release replaces the old reverse-complement workflow with direct target-base scanning on the original input sequence. It is a breaking CLI and output-schema update.
