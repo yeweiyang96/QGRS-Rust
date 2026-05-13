@@ -7,8 +7,9 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 
 use crate::qgrs::{
-    InputMode, ScanLimits, SequenceTopology, consolidate_g4s, consolidate_g4s_with_topology,
-    find_owned_bytes, find_owned_bytes_with_topology, load_sequences_from_path, render_csv_results,
+    InputMode, QuartetBase, ScanLimits, SequenceTopology, consolidate_g4s,
+    consolidate_g4s_with_topology, find_owned_bytes, find_owned_bytes_with_topology,
+    find_owned_bytes_with_topology_and_base, load_sequences_from_path, render_csv_results,
     render_csv_results_with_projection, render_family_ranges_csv_with_projection,
     write_parquet_family_ranges, write_parquet_results,
 };
@@ -35,6 +36,23 @@ fn empty_sequence_has_no_hits() {
     let raw = find_owned_bytes(arc_from_sequence("ACACAC"), 4, 17);
     let (results, _ranges) = consolidate_g4s(raw);
     assert!(results.is_empty());
+}
+
+#[test]
+fn target_base_loops_do_not_exceed_max_run() {
+    let raw = find_owned_bytes_with_topology_and_base(
+        arc_from_sequence("CCCCCCCCCCCCCCCC"),
+        2,
+        17,
+        ScanLimits::new(45, 10),
+        SequenceTopology::Linear,
+        QuartetBase::C,
+    );
+    assert!(!raw.is_empty());
+    assert!(
+        raw.iter()
+            .all(|g4| longest_target_run(g4.sequence().as_bytes(), b'C') <= 10)
+    );
 }
 
 #[test]
@@ -128,6 +146,21 @@ fn load_sequences_mmap_mode_reads_gzip_fasta_matching_plain() {
 
     fs::remove_file(&plain_path).unwrap();
     fs::remove_file(&gz_path).unwrap();
+}
+
+fn longest_target_run(sequence: &[u8], target: u8) -> usize {
+    let target = target.to_ascii_uppercase();
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for byte in sequence {
+        if byte.to_ascii_uppercase() == target {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
 }
 
 #[test]

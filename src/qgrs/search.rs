@@ -111,6 +111,7 @@ struct G4Candidate {
     y2: i32,
     y3: i32,
     max_length: usize,
+    max_run: usize,
     target_base: QuartetBase,
 }
 
@@ -130,6 +131,7 @@ impl G4Candidate {
             y2: -1,
             y3: -1,
             max_length: maximum_length(num_tetrads, limits),
+            max_run: limits.max_run,
             target_base,
         }
     }
@@ -217,6 +219,9 @@ impl G4Candidate {
         if self.length() > self.max_length {
             return false;
         }
+        if self.exceeds_target_run_limit() {
+            return false;
+        }
         let mut zero_loops = 0;
         if self.y1 < 1 {
             zero_loops += 1;
@@ -228,6 +233,30 @@ impl G4Candidate {
             zero_loops += 1;
         }
         zero_loops < 2
+    }
+
+    fn covered_end(&self) -> usize {
+        self.cursor()
+            .unwrap_or_else(|| self.start.saturating_add(self.length()))
+    }
+
+    fn exceeds_target_run_limit(&self) -> bool {
+        let end = self.covered_end().min(self.seq.normalized.len());
+        let Some(window) = self.seq.normalized.get(self.start..end) else {
+            return false;
+        };
+        let mut run_len = 0usize;
+        for &byte in window {
+            if self.target_base.matches(byte) {
+                run_len += 1;
+                if run_len > self.max_run {
+                    return true;
+                }
+            } else {
+                run_len = 0;
+            }
+        }
+        false
     }
 
     fn find_loop_lengths_from(&self, ys: &mut Vec<i32>, cursor: usize) {
@@ -272,7 +301,9 @@ impl G4Candidate {
                     } else if next.y3 < 0 {
                         next.y3 = y;
                     }
-                    if next.partial_length() <= next.max_length as i32 {
+                    if next.partial_length() <= next.max_length as i32
+                        && !next.exceeds_target_run_limit()
+                    {
                         results.push(next);
                     }
                 }

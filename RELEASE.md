@@ -1,5 +1,31 @@
 # Release Notes
 
+## v1.7.0 - Bounded target-base run expansion
+
+This release fixes a memory blow-up in target-base scans on pathological contigs that contain very long uninterrupted G or C runs.
+
+### Fixed issue
+
+- Fixed unbounded candidate growth when `--base c` scans i-motif candidates across a long C-rich contig, such as a 140.5 kb sequence with a 34,681 bp continuous C run.
+- The same failure mode could affect `--base g` on G-rich inputs with very long uninterrupted G runs.
+- The bug came from applying `--max-run` only to the tetrad seed size. The search still enumerated every start offset inside a long target-base run and allowed loop expansion to keep candidates whose full motif sequence contained more than `--max-run` consecutive target bases.
+
+### Behavior change
+
+- `--max-run` now also limits the longest continuous selected target-base run inside each partial and complete candidate motif.
+- Candidates whose covered motif interval already contains more than `--max-run` consecutive target bases are pruned during expansion.
+- Complete candidates are checked again before export, so reported G4/i-motif hits now match the documented target-base run limit.
+- Existing results can shrink when previous outputs contained motifs with over-limit continuous G or C runs. Motifs whose G/C runs are within the configured limit are unchanged.
+
+### Validation covered
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+git diff --check
+```
+
 ## v1.6.4 - CI warning-gate compatibility
 
 This patch release keeps the `v1.6.3` base-selectable G4/i-motif behavior and updates the codebase for the current strict Clippy warning gate used by CI.
